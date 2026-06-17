@@ -1,0 +1,34 @@
+# Render blueprint — connect the repo at render.com and it picks this up.
+# This must be a single long-running service (not serverless) because the
+# daily agent cron lives inside the Node process.
+services:
+  - type: web
+    name: ayus-ops
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: LLM_PROVIDER
+        value: anthropic
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CLAUDE_MODEL
+        value: claude-sonnet-4-6
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: AYUS Labs <onboarding@resend.dev>
+      - key: DAILY_CRON
+        value: 0 9 * * *

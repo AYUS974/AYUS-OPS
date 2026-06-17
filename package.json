@@ -1,0 +1,27 @@
+{
+  "name": "ayus-ops",
+  "version": "1.0.0",
+  "description": "AI-run operations system for AYUS Labs — agents propose, you approve.",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "concurrently -n server,web -c blue,magenta \"node --watch src/index.js\" \"npm run dev --prefix web\"",
+    "build": "npm install --prefix web && npm run build --prefix web",
+    "run-agents": "node -e \"import('./src/orchestrator.js').then(m => m.runAll()).then(r => { console.log(JSON.stringify(r, null, 2)); process.exit(0); })\""
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "resend": "^4.0.1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
