@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api.js";
-import { speak, stopSpeaking, createRecognizer, onSpeaking, voiceSupport } from "../lib/voice.js";
+import { speak, stopSpeaking, createMicSession, onSpeaking, voiceSupport } from "../lib/voice.js";
 import "./AyusReactor.css";
 
 /*
@@ -31,17 +31,17 @@ export default function AyusReactor({ variant = "band" }) {
   const [lastUser, setLastUser] = useState("");
   const [lastReply, setLastReply] = useState("");
   const [input, setInput] = useState("");
+  const [convo, setConvo] = useState(false); // always-on hands-free conversation mode
 
   // refs the render loop reads without re-subscribing
   const stateRef = useRef("standby");
   const levelRef = useRef(0);
   const pulseRef = useRef(0);
-  const analyserRef = useRef(null);
-  const timeDataRef = useRef(null);
-  const freqDataRef = useRef(null);
-  const streamRef = useRef(null);
-  const audioCtxRef = useRef(null);
-  const recRef = useRef(null);
+  const micLevelRef = useRef(0); // 0..1 live input loudness, drives the listening pulse
+  const sessionRef = useRef(null); // active mic dictation session (server-side Whisper)
+  const historyRef = useRef([]); // rolling conversation [{role, content}] so AYUS keeps context
+  const convoRef = useRef(false); // mirror of `convo` for async callbacks
+  const reArmRef = useRef(null); // pending "listen again" timer
   const support = voiceSupport();
 
   function go(s) {
@@ -60,6 +60,30 @@ export default function AyusReactor({ variant = "band" }) {
       }),
     []
   );
+
+  // Restore the conversation across page refreshes.
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("ayus_reactor_history") || "[]");
+      if (Array.isArray(saved) && saved.length) {
+        historyRef.current = saved.slice(-12);
+        const lastU = [...saved].reverse().find((m) => m.role === "user");
+        const lastA = [...saved].reverse().find((m) => m.role === "assistant");
+        if (lastU) setLastUser(lastU.content);
+        if (lastA) setLastReply(lastA.content);
+      }
+    } catch {
+      /* ignore corrupt history */
+    }
+  }, []);
+
+  function persistHistory() {
+    try {
+      localStorage.setItem("ayus_reactor_history", JSON.stringify(historyRef.current));
+    } catch {
+      /* storage full / unavailable — non-fatal */
+    }
+  }
 
   /* ---------------- mouse parallax ---------------- */
   const pointerRef = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
@@ -114,17 +138,9 @@ export default function AyusReactor({ variant = "band" }) {
 
     function readLevel(st) {
       let target = 0;
-      const an = analyserRef.current;
-      if (an && st === "listening") {
-        const td = timeDataRef.current;
-        an.getByteTimeDomainData(td);
-        let sum = 0;
-        for (let i = 0; i < td.length; i++) {
-          const v = (td[i] - 128) / 128;
-          sum += v * v;
-        }
-        target = Math.min(1, Math.sqrt(sum / td.length) * 3.2);
-        an.getByteFrequencyData(freqDataRef.current);
+      if (st === "listening") {
+        // micLevelRef is fed by the mic session's onLevel callback below.
+        target = Math.min(1, micLevelRef.current * 3.4);
       } else {
         const t = performance.now() / 1000;
         target = 0.12 + 0.05 * Math.sin(t * 1.6) + pulseRef.current;
@@ -221,15 +237,11 @@ export default function AyusReactor({ variant = "band" }) {
       ctx.translate(cx + ringDX, cy + ringDY);
       ctx.lineCap = "round";
       const r0 = base * 1.3;
-      const fd = freqDataRef.current;
       for (let i = 0; i < N; i++) {
         const a = (i / N) * Math.PI * 2 - Math.PI / 2;
-        let mag;
-        if (analyserRef.current && st === "listening" && fd) {
-          mag = fd[Math.floor((i / N) * fd.length)] / 255;
-        } else {
-          mag = (0.25 + 0.75 * Math.abs(Math.sin(i * 0.5 + spin * 2))) * (0.3 + lvl);
-        }
+        // Bars pulse with the live input level (lvl) while listening, and breathe
+        // ambiently otherwise.
+        const mag = (0.25 + 0.75 * Math.abs(Math.sin(i * 0.5 + spin * 2))) * (0.3 + lvl);
         const len = base * 0.1 + mag * base * 0.85 * (0.5 + lvl);
         const x0 = Math.cos(a) * r0, y0 = Math.sin(a) * r0;
         const x1 = Math.cos(a) * (r0 + len), y1 = Math.sin(a) * (r0 + len);
@@ -320,34 +332,6 @@ export default function AyusReactor({ variant = "band" }) {
     };
   }, []);
 
-  /* ---------------- mic analyser (for the listening pulse) ---------------- */
-  async function startAnalyser() {
-    if (analyserRef.current) return;
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      const ac = new (window.AudioContext || window.webkitAudioContext)();
-      audioCtxRef.current = ac;
-      const src = ac.createMediaStreamSource(stream);
-      const an = ac.createAnalyser();
-      an.fftSize = 256;
-      an.smoothingTimeConstant = 0.8;
-      freqDataRef.current = new Uint8Array(an.frequencyBinCount);
-      timeDataRef.current = new Uint8Array(an.fftSize);
-      src.connect(an);
-      analyserRef.current = an;
-    } catch {
-      /* no mic — the orb still animates ambiently */
-    }
-  }
-  function stopAnalyser() {
-    analyserRef.current = null;
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    audioCtxRef.current?.close?.();
-    audioCtxRef.current = null;
-  }
-
   /* ---------------- conversation ---------------- */
   async function send(text) {
     const msg = (text || "").trim();
@@ -356,66 +340,115 @@ export default function AyusReactor({ variant = "band" }) {
     setLastUser(msg);
     setLastReply("");
     go("thinking");
+    // Keep a rolling window of the last ~12 turns so AYUS has conversation
+    // context (the backend further trims + injects the live company snapshot).
+    const history = [...historyRef.current, { role: "user", content: msg }].slice(-12);
+    historyRef.current = history;
+    persistHistory();
     try {
       const res = await api("/secretary/chat", {
         method: "POST",
-        body: JSON.stringify({ messages: [{ role: "user", content: msg }] }),
+        body: JSON.stringify({ messages: history }),
       });
       const reply = res?.message || "…";
+      historyRef.current = [...historyRef.current, { role: "assistant", content: reply }].slice(-12);
+      persistHistory();
       setLastReply(reply);
       await speak(reply, "ayus"); // onSpeaking flips state → speaking → standby
+      if (convoRef.current) scheduleReArm(); // always-on: listen again after replying
     } catch (err) {
       setLastReply("My apologies — I couldn't reach the core. " + (err?.message || ""));
       go("standby");
+      if (convoRef.current) scheduleReArm();
     }
   }
 
+  // Records one utterance with MediaRecorder + voice-activity detection and
+  // transcribes it server-side via Groq Whisper (/api/stt) — works in every
+  // browser, unlike the old Chromium-only Web Speech API.
   function startListening() {
-    if (listening) return;
+    if (sessionRef.current) return; // a turn is already live
+    if (!support.stt) return;
     stopSpeaking();
-    startAnalyser();
-    const rec = createRecognizer({
-      onResult: (t, isFinal) => {
-        setInterim(t);
-        if (isFinal && t.trim()) {
-          setListening(false);
-          stopAnalyser();
-          send(t.trim());
-        }
+    micLevelRef.current = 0;
+    sessionRef.current = createMicSession({
+      onListening: () => {
+        setListening(true);
+        go("listening");
       },
-      onEnd: () => {
+      onLevel: (rms) => {
+        micLevelRef.current = rms; // feeds the reactor's listening pulse
+      },
+      onResult: (text) => send(text),
+      onEnd: (gotSpeech) => {
         setListening(false);
-        stopAnalyser();
+        micLevelRef.current = 0;
+        sessionRef.current = null;
         if (stateRef.current === "listening") go("standby");
+        // Always-on: heard nothing this turn → just keep listening.
+        if (convoRef.current && !gotSpeech) scheduleReArm(300);
       },
-      onError: () => {
+      onError: (err) => {
         setListening(false);
-        stopAnalyser();
+        micLevelRef.current = 0;
+        sessionRef.current = null;
         go("standby");
+        setLastReply(
+          err === "not-allowed"
+            ? "Allow microphone access so I can hear you, sir."
+            : err === "transcribe-failed"
+              ? "I didn't catch that — please try again."
+              : "I couldn't open the microphone."
+        );
+        // A transient hiccup shouldn't kill the conversation — try again.
+        if (convoRef.current && err === "transcribe-failed") scheduleReArm(500);
       },
     });
-    if (!rec) {
-      go("standby");
-      return;
-    }
-    recRef.current = rec;
-    setListening(true);
-    go("listening");
-    rec.start();
-  }
-  function stopListening() {
-    recRef.current?.stop?.();
-    setListening(false);
-    stopAnalyser();
-    if (stateRef.current === "listening") go("standby");
-  }
-  function hardStop() {
-    stopSpeaking();
-    stopListening();
-    go("standby");
   }
 
-  useEffect(() => () => { stopAnalyser(); stopSpeaking(); }, []);
+  // Re-open the mic shortly, as long as conversation mode is still on and no
+  // turn is already running. This is what makes "always-on" continuous.
+  function scheduleReArm(delay = 400) {
+    clearTimeout(reArmRef.current);
+    reArmRef.current = setTimeout(() => {
+      if (convoRef.current && !sessionRef.current) startListening();
+    }, delay);
+  }
+
+  // The TALK button toggles always-on conversation. On → listen continuously and
+  // auto-continue after every reply; off → stop and go quiet.
+  function toggleConvo() {
+    if (!support.stt) return;
+    if (convoRef.current) {
+      stopConvo();
+    } else {
+      convoRef.current = true;
+      setConvo(true);
+      startListening();
+    }
+  }
+
+  function stopConvo() {
+    convoRef.current = false;
+    setConvo(false);
+    clearTimeout(reArmRef.current);
+    stopSpeaking();
+    sessionRef.current?.cancel?.();
+    sessionRef.current = null;
+    micLevelRef.current = 0;
+    setListening(false);
+    go("standby");
+  }
+  const hardStop = stopConvo; // ■ STOP fully stops voice + conversation mode
+
+  useEffect(
+    () => () => {
+      clearTimeout(reArmRef.current);
+      sessionRef.current?.cancel?.();
+      stopSpeaking();
+    },
+    []
+  );
 
   return (
     <div className={`ayus-reactor ${variant === "page" ? "is-page" : ""}`} style={{ "--ax": STATE_COLORS[state] }}>
@@ -428,7 +461,10 @@ export default function AyusReactor({ variant = "band" }) {
         <div className="ayus-reactor-head">
           <span className="ayus-reactor-brand">A Y U S</span>
           <span className="ayus-reactor-word">
-            {state.toUpperCase()} · {STATE_SUB[state]}
+            {state.toUpperCase()} ·{" "}
+            {convo && (state === "standby" || state === "listening")
+              ? "always-on — just speak"
+              : STATE_SUB[state]}
           </span>
         </div>
 
@@ -452,10 +488,11 @@ export default function AyusReactor({ variant = "band" }) {
           {support.stt && (
             <button
               type="button"
-              className={`ayus-talk-btn ${listening ? "live" : ""}`}
-              onClick={() => (listening ? stopListening() : startListening())}
+              className={`ayus-talk-btn ${convo ? "live" : ""}`}
+              title={convo ? "Always-on conversation is ON — click to stop" : "Click once for hands-free conversation"}
+              onClick={toggleConvo}
             >
-              {listening ? "◉ LISTENING" : "◉ TALK"}
+              {convo ? (listening ? "◉ LISTENING" : "◉ LIVE") : "◉ TALK"}
             </button>
           )}
           <input

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, getSupabase } from "../lib/api.js";
-import { speak, stopSpeaking, createRecognizer, onSpeaking, voiceSupport } from "../lib/voice.js";
+import { speak, stopSpeaking, onSpeaking } from "../lib/voice.js";
+import { useAyusVoice } from "../lib/useAyusVoice.js";
 import AyusReactor from "./AyusReactor.jsx";
 
 const AGENTS = ["sales", "finance", "marketing", "secretary", "hr", "cto"];
@@ -565,62 +566,17 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [proposingMap, setProposingMap] = useState({});
-  const [voiceOn, setVoiceOn] = useState(() => localStorage.getItem("ayus_voice") !== "off");
-  const [listening, setListening] = useState(false);
-  const [speaking, setSpeaking] = useState(false);
   const chatEndRef = useRef(null);
-  const recognizerRef = useRef(null);
-  const support = voiceSupport();
 
-  // Track when AYUS is talking (for the header indicator)
-  useEffect(() => onSpeaking((isSpeaking) => setSpeaking(isSpeaking)), []);
-
-  // Stop any speech/listening when the drawer closes or unmounts
-  useEffect(() => {
-    if (!isOpen) {
-      stopSpeaking();
-      recognizerRef.current?.stop?.();
-      setListening(false);
-    }
-    return () => stopSpeaking();
-  }, [isOpen]);
-
-  function toggleVoice() {
-    const next = !voiceOn;
-    setVoiceOn(next);
-    localStorage.setItem("ayus_voice", next ? "on" : "off");
-    if (!next) stopSpeaking();
-  }
-
-  function toggleMic() {
-    if (listening) {
-      recognizerRef.current?.stop?.();
-      setListening(false);
-      return;
-    }
-    stopSpeaking();
-    const rec = createRecognizer({
-      onResult: (transcript, isFinal) => {
-        setInput(transcript);
-        if (isFinal && transcript.trim()) {
-          setListening(false);
-          sendMessage(transcript.trim());
-        }
-      },
-      onEnd: () => setListening(false),
-      onError: (err) => {
-        setListening(false);
-        if (err !== "no-speech" && err !== "aborted") showToast("Mic error: " + err, "err");
-      },
-    });
-    if (!rec) {
-      showToast("Speech input is not supported in this browser — try Chrome or Edge", "err");
-      return;
-    }
-    recognizerRef.current = rec;
-    setListening(true);
-    rec.start();
-  }
+  // All voice behaviour (dictation, hands-free conversation, "Hello AYUS" wake
+  // word, spoken replies) lives in one hook — see lib/useAyusVoice.js.
+  const voice = useAyusVoice({
+    open: isOpen,
+    busy: loading,
+    onUtterance: (text) => sendMessage(text),
+    showToast,
+  });
+  const { support, voiceOn, wakeOn, listening, speaking } = voice;
 
   // Load chat history from localStorage
   useEffect(() => {
@@ -655,6 +611,7 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
 
   async function sendMessage(text) {
     if (!text.trim() || loading) return;
+    voice.beginRequest(); // pause the wake word while AYUS thinks/speaks
 
     const userMsg = {
       role: "user",
@@ -691,7 +648,7 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
       const finalMessages = [...updatedMessages, ayusMsg];
       setMessages(finalMessages);
       localStorage.setItem("ayus_chat_history", JSON.stringify(finalMessages));
-      if (voiceOn) speak(response.message, "ayus");
+      voice.speakReply(response.message); // speaks if un-muted; keeps a conversation going
     } catch (err) {
       showToast("Error communicating with AYUS: " + err.message, "err");
       const errorMsg = {
@@ -700,6 +657,7 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
         timestamp: new Date().toISOString()
       };
       setMessages(prev => [...prev, errorMsg]);
+      voice.speakReply(errorMsg.content); // keep hands-free conversation alive on errors
     } finally {
       setLoading(false);
     }
@@ -776,7 +734,7 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
             <button
               className={`voice-toggle-btn ${voiceOn ? "on" : ""}`}
               title={voiceOn ? "Voice replies ON — click to mute" : "Voice replies OFF — click to unmute"}
-              onClick={toggleVoice}
+              onClick={voice.toggleVoice}
             >
               {voiceOn ? "🔊" : "🔇"}
             </button>
@@ -867,19 +825,27 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
         </div>
 
         <form className="drawer-input-area" onSubmit={handleSend}>
-          {support.stt && (
+          {support.wake && (
             <button
               type="button"
-              className={`mic-btn ${listening ? "listening" : ""}`}
-              title={listening ? "Listening — click to stop" : "Speak to AYUS"}
-              onClick={toggleMic}
+              className={`mic-btn ${wakeOn ? "wake-on" : ""}`}
+              title={wakeOn ? "Wake word ON — just say “Hello AYUS”" : "Wake word OFF — click to enable “Hello AYUS”"}
+              onClick={voice.toggleWake}
             >
-              {listening ? "◉" : "🎙"}
+              {wakeOn ? "👂" : "💤"}
             </button>
           )}
+          <button
+            type="button"
+            className={`mic-btn ${listening ? "listening" : ""}`}
+            title={listening ? "Listening — click to stop" : "Speak to AYUS (hands-free)"}
+            onClick={voice.toggleMic}
+          >
+            {listening ? "◉" : "🎙"}
+          </button>
           <input
             type="text"
-            placeholder={listening ? "Listening…" : "Type or speak to AYUS…"}
+            placeholder={listening ? "Listening…" : wakeOn ? "Say “Hello AYUS” or type…" : "Type or speak to AYUS…"}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             disabled={loading}

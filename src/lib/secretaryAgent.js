@@ -1,5 +1,6 @@
 import { db } from "./supabase.js";
 import { geminiGenerate } from "./gemini.js";
+import { groqChat } from "./groq.js";
 import { PC_TOOL_DECLARATIONS, PC_TOOL_HANDLERS, ALLOWED_DIRS } from "./pc-tools.js";
 import { memoryBlock, remember } from "./memory.js";
 import { isGoogleConnected, listRecentEmails, listUpcomingEvents } from "./google.js";
@@ -116,6 +117,54 @@ CRITICAL RULES:
 - Emails you draft must be professional English (signed 'Team AYUS Labs'), even though you chat in Hinglish.
 - If a tool fails, tell the founder honestly what happened.`;
 
+// Execute a single tool call by name. Shared by the Gemini and Groq chat loops.
+// Returns { result, suggestedAction } — suggestedAction is set only for propose_action.
+async function execTool(name, args) {
+  let result;
+  let suggestedAction = null;
+  try {
+    if (name === "propose_action") {
+      suggestedAction = args;
+      result = { ok: true, result: "Draft ready — it will be shown to the founder to add to the approval queue." };
+    } else if (name === "gmail_search") {
+      if (!(await isGoogleConnected())) {
+        result = { ok: false, error: "Google not connected — founder must Connect Google first." };
+      } else {
+        const emails = await listRecentEmails({ q: args?.q || "", maxResults: args?.maxResults || 8 });
+        result = { ok: true, result: emails };
+      }
+    } else if (name === "calendar_upcoming") {
+      if (!(await isGoogleConnected())) {
+        result = { ok: false, error: "Google not connected — founder must Connect Google first." };
+      } else {
+        const events = await listUpcomingEvents({ maxResults: args?.maxResults || 10 });
+        result = { ok: true, result: events };
+      }
+    } else if (name === "remember") {
+      const saved = await remember({
+        agent: args?.scope === "secretary" ? "secretary" : "company",
+        kind: args?.kind || "preference",
+        content: args?.content,
+        weight: 2,
+      });
+      result = saved
+        ? { ok: true, result: "Noted, sir — I'll keep that in mind going forward." }
+        : { ok: false, error: "could not save memory" };
+    } else if (PC_TOOL_HANDLERS[name]) {
+      result = await PC_TOOL_HANDLERS[name](args || {});
+    } else {
+      result = { ok: false, error: `unknown tool ${name}` };
+    }
+  } catch (err) {
+    result = { ok: false, error: String(err.message || err) };
+  }
+  return { result, suggestedAction };
+}
+
+function toolEventLine(name, args, result) {
+  return `${name}${args && Object.keys(args).length ? `(${Object.values(args).map(String).join(", ").slice(0, 60)})` : ""} → ${result.ok ? "✓" : "✗ " + (result.error || "")}`;
+}
+
 async function callGemini(contents, tools) {
   const data = await geminiGenerate(
     {
@@ -189,50 +238,82 @@ export async function runSecretaryChat(messages) {
 
     for (const { functionCall } of calls) {
       const { name, args } = functionCall;
-      let result;
-      try {
-        if (name === "propose_action") {
-          suggestedAction = args;
-          result = { ok: true, result: "Draft ready — it will be shown to the founder to add to the approval queue." };
-        } else if (name === "gmail_search") {
-          if (!(await isGoogleConnected())) {
-            result = { ok: false, error: "Google not connected — founder must Connect Google first." };
-          } else {
-            const emails = await listRecentEmails({ q: args?.q || "", maxResults: args?.maxResults || 8 });
-            result = { ok: true, result: emails };
-          }
-        } else if (name === "calendar_upcoming") {
-          if (!(await isGoogleConnected())) {
-            result = { ok: false, error: "Google not connected — founder must Connect Google first." };
-          } else {
-            const events = await listUpcomingEvents({ maxResults: args?.maxResults || 10 });
-            result = { ok: true, result: events };
-          }
-        } else if (name === "remember") {
-          const saved = await remember({
-            agent: args?.scope === "secretary" ? "secretary" : "company",
-            kind: args?.kind || "preference",
-            content: args?.content,
-            weight: 2,
-          });
-          result = saved
-            ? { ok: true, result: "Noted, sir — I'll keep that in mind going forward." }
-            : { ok: false, error: "could not save memory" };
-        } else if (PC_TOOL_HANDLERS[name]) {
-          result = await PC_TOOL_HANDLERS[name](args || {});
-        } else {
-          result = { ok: false, error: `unknown tool ${name}` };
-        }
-      } catch (err) {
-        result = { ok: false, error: String(err.message || err) };
-      }
-      toolEvents.push(
-        `${name}${args && Object.keys(args).length ? `(${Object.values(args).map(String).join(", ").slice(0, 60)})` : ""} → ${result.ok ? "✓" : "✗ " + (result.error || "")}`
-      );
+      const { result, suggestedAction: sa } = await execTool(name, args);
+      if (sa) suggestedAction = sa;
+      toolEvents.push(toolEventLine(name, args, result));
       responseParts.push({ functionResponse: { name, response: result } });
     }
 
     contents.push({ role: "user", parts: responseParts });
+  }
+
+  return {
+    message: "That took rather more steps than expected, sir — could you simplify the request and try again?",
+    toolEvents,
+    suggestedAction,
+  };
+}
+
+// Gemini-style tool declarations → OpenAI/Groq tool format.
+function toGroqTools(decls) {
+  return decls.map((d) => ({
+    type: "function",
+    function: { name: d.name, description: d.description, parameters: d.parameters },
+  }));
+}
+
+/**
+ * Same as runSecretaryChat but backed by Groq — dramatically faster inference
+ * (sub-second), so AYUS feels close to real-time. Uses OpenAI-style tool calling.
+ */
+export async function runSecretaryChatGroq(messages) {
+  const snapshot = await companySnapshot();
+  const history = messages.slice(-10);
+  const chatMessages = [
+    { role: "system", content: SYSTEM },
+    ...history.map((m, i, arr) => ({
+      role: m.role === "user" ? "user" : "assistant",
+      content:
+        i === arr.length - 1 && m.role === "user" ? `${snapshot}\n\nFounder says: ${m.content}` : m.content,
+    })),
+  ];
+
+  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, PROPOSE_TOOL, REMEMBER_TOOL]);
+  const toolEvents = [];
+  let suggestedAction = null;
+
+  for (let round = 0; round < 6; round++) {
+    const msg = await groqChat(chatMessages, tools);
+    const calls = msg.tool_calls || [];
+
+    if (calls.length === 0) {
+      return {
+        message: (msg.content || "").trim() || "Apologies, sir — I didn't quite catch that. Could you rephrase?",
+        toolEvents,
+        suggestedAction,
+      };
+    }
+
+    chatMessages.push({ role: "assistant", content: msg.content || "", tool_calls: calls });
+
+    for (const call of calls) {
+      const name = call.function?.name;
+      let args = {};
+      try {
+        args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
+      } catch {
+        /* malformed args — pass through as empty */
+      }
+      const { result, suggestedAction: sa } = await execTool(name, args);
+      if (sa) suggestedAction = sa;
+      toolEvents.push(toolEventLine(name, args, result));
+      chatMessages.push({
+        role: "tool",
+        tool_call_id: call.id,
+        name,
+        content: JSON.stringify(result).slice(0, 4000),
+      });
+    }
   }
 
   return {

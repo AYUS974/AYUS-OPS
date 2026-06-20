@@ -1,9 +1,11 @@
 import { claudeJSON } from "./claude.js";
 import { geminiJSON } from "./gemini.js";
+import { groqJSON } from "./groq.js";
 
 const PROVIDERS = {
   anthropic: claudeJSON,
   gemini: geminiJSON,
+  groq: groqJSON,
 };
 
 const provider = (process.env.LLM_PROVIDER || "anthropic").toLowerCase();

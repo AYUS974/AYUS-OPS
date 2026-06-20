@@ -159,6 +159,7 @@ export async function listRecentEmails({ q = "", maxResults = 8 } = {}) {
     );
     const h = Object.fromEntries((msg.payload?.headers || []).map((x) => [x.name.toLowerCase(), x.value]));
     out.push({
+      id,
       from: h.from || "",
       subject: h.subject || "(no subject)",
       date: h.date || "",

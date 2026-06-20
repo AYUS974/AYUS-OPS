@@ -1,3 +1,4 @@
+import "./lib/ca.js"; // trust Avast's MITM CA before any HTTPS call (must be first)
 import "dotenv/config";
 import express from "express";
 import cron from "node-cron";
@@ -8,12 +9,13 @@ import { db } from "./lib/supabase.js";
 import { executeAction } from "./lib/executor.js";
 import { requireAuth } from "./lib/auth.js";
 import { runAll } from "./orchestrator.js";
-import { runSecretaryChat } from "./lib/secretaryAgent.js";
+import { runSecretaryChat, runSecretaryChatGroq } from "./lib/secretaryAgent.js";
 import { learnFromDecision } from "./lib/memory.js";
 import { dispatchHandoffs } from "./lib/handoffs.js";
 import { notify, esc } from "./lib/notify.js";
 import { buildAnalytics } from "./lib/analytics.js";
-import { googleRouter, googleCallback } from "./lib/google.js";
+import { googleRouter, googleCallback, isGoogleConnected, listRecentEmails } from "./lib/google.js";
+import { groqTranscribe } from "./lib/groq.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -54,7 +56,27 @@ api.post("/secretary/chat", async (req, res) => {
   }
 
   try {
-    const { message, toolEvents, suggestedAction } = await runSecretaryChat(messages);
+    // Groq is much faster than Gemini's rate-limited free tier — use it for AYUS
+    // chat whenever a key is set, so replies feel close to real-time. But Groq's
+    // free tier also throttles (429 "rate limit reached"); when it does, fall
+    // back to Gemini so AYUS stays responsive instead of dead-ending.
+    let result;
+    if (process.env.GROQ_API_KEY) {
+      try {
+        result = await runSecretaryChatGroq(messages);
+      } catch (groqErr) {
+        if (!process.env.GEMINI_API_KEY) throw groqErr;
+        console.warn(
+          "[secretary] Groq chat failed — falling back to Gemini:",
+          String(groqErr.message || groqErr).slice(0, 160)
+        );
+        result = await runSecretaryChat(messages);
+      }
+    } else {
+      result = await runSecretaryChat(messages);
+    }
+
+    const { message, toolEvents, suggestedAction } = result;
     res.json({
       message,
       toolEvents,
@@ -66,16 +88,29 @@ api.post("/secretary/chat", async (req, res) => {
   }
 });
 
-// Text-to-speech: Cartesia (primary) → ElevenLabs (fallback) → 404, in which
+// Text-to-speech: Sarvam (primary) → Cartesia → ElevenLabs → 404, in which
 // case the browser falls back to its built-in speechSynthesis voices (free).
+// Sarvam's Bulbul model is purpose-built for Indian languages and handles
+// Hinglish code-switching natively (Hindi↔English in a single pass), so it's
+// the best fit for AYUS's mixed-language replies.
+const SARVAM_VOICES = {
+  // bulbul:v3 speakers matched to each agent's personality; override in .env.
+  ayus: process.env.SARVAM_VOICE_AYUS || "priya", // composed female assistant — JARVIS-style
+  sales: process.env.SARVAM_VOICE_SALES || "rahul", // friendly, upbeat male
+  finance: process.env.SARVAM_VOICE_FINANCE || "shreya", // decisive female
+  marketing: process.env.SARVAM_VOICE_MARKETING || "aditya", // warm, engaging male
+  hr: process.env.SARVAM_VOICE_HR || "neha", // friendly female
+  cto: process.env.SARVAM_VOICE_CTO || "shubh", // deep, thoughtful male
+};
+
 const CARTESIA_VOICES = {
-  // Starter-library voices matched to each agent's personality; override in .env.
-  ayus: process.env.CARTESIA_VOICE_AYUS || "5ee9feff-1265-424a-9d7f-8e4d431a12c7", // deep, composed — JARVIS-style
-  sales: process.env.CARTESIA_VOICE_SALES || "630ed21c-2c5c-41cf-9d82-10a7fd668370", // Corey — cheerful
-  finance: process.env.CARTESIA_VOICE_FINANCE || "62ae83ad-4f6a-430b-af41-a9bede9286ca", // Gemma — decisive
-  marketing: process.env.CARTESIA_VOICE_MARKETING || "ef191366-f52f-447a-a398-ed8c0f2943a1", // Archie — warm
-  hr: process.env.CARTESIA_VOICE_HR || "f786b574-daa5-4673-aa0c-cbe3e8534c02", // Katie — friendly
-  cto: process.env.CARTESIA_VOICE_CTO || "5ee9feff-1265-424a-9d7f-8e4d431a12c7", // Ronald — deep thinker
+  // Indian-accent (Hindi/Hinglish) voices matched to each agent's personality; override in .env.
+  ayus: process.env.CARTESIA_VOICE_AYUS || "0f14d8cb-f039-41fe-a813-a9b4bee7eed8", // Nisha — elegant female, composed JARVIS-style
+  sales: process.env.CARTESIA_VOICE_SALES || "910fb75e-1d20-4840-ac63-ac6b26a71bdc", // Dev — friendly host, cheerful
+  finance: process.env.CARTESIA_VOICE_FINANCE || "432fc642-6a83-4975-b77a-c605903b5ba6", // Sanya — modern, decisive
+  marketing: process.env.CARTESIA_VOICE_MARKETING || "7e8cb11d-37af-476b-ab8f-25da99b18644", // Anuj — engaging narrator, warm
+  hr: process.env.CARTESIA_VOICE_HR || "47f3bbb1-e98f-4e0c-92c5-5f0325e1e206", // Neha — virtual assistant, friendly
+  cto: process.env.CARTESIA_VOICE_CTO || "6b7468f5-d6b0-4d6b-b38a-46f6d6e5bac7", // Rakesh — thoughtful, deep thinker
 };
 
 const ELEVEN_VOICES = {
@@ -87,6 +122,28 @@ const ELEVEN_VOICES = {
   cto: process.env.ELEVENLABS_VOICE_CTO || "VR6AewLTigWG4xSOukaG",
 };
 
+async function sarvamTTS(text, agent) {
+  const r = await fetch("https://api.sarvam.ai/text-to-speech", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "api-subscription-key": process.env.SARVAM_API_KEY,
+    },
+    body: JSON.stringify({
+      text,
+      model: process.env.SARVAM_MODEL || "bulbul:v3",
+      speaker: SARVAM_VOICES[agent] || SARVAM_VOICES.ayus,
+      target_language_code: "hi-IN", // Hindi/Hinglish — Bulbul code-switches natively
+      output_audio_codec: "mp3",
+      speech_sample_rate: "44100",
+    }),
+  });
+  if (!r.ok) throw new Error(`Sarvam ${r.status}: ${(await r.text()).slice(0, 120)}`);
+  const { audios } = await r.json();
+  if (!audios?.[0]) throw new Error("Sarvam returned no audio");
+  return Buffer.from(audios[0], "base64");
+}
+
 async function cartesiaTTS(text, agent) {
   const r = await fetch("https://api.cartesia.ai/tts/bytes", {
     method: "POST",
@@ -96,11 +153,11 @@ async function cartesiaTTS(text, agent) {
       "Cartesia-Version": "2024-11-13",
     },
     body: JSON.stringify({
-      model_id: "sonic-2",
+      model_id: "sonic-3",
       transcript: text,
       voice: { mode: "id", id: CARTESIA_VOICES[agent] || CARTESIA_VOICES.ayus },
       output_format: { container: "mp3", bit_rate: 128000, sample_rate: 44100 },
-      language: "en",
+      language: "hi", // Hindi/Hinglish — Indian-accent voices speak mixed text best
     }),
   });
   if (!r.ok) throw new Error(`Cartesia ${r.status}: ${(await r.text()).slice(0, 120)}`);
@@ -127,7 +184,8 @@ api.post("/tts", async (req, res) => {
 
   try {
     let audio;
-    if (process.env.CARTESIA_API_KEY) audio = await cartesiaTTS(clean, agent);
+    if (process.env.SARVAM_API_KEY) audio = await sarvamTTS(clean, agent);
+    else if (process.env.CARTESIA_API_KEY) audio = await cartesiaTTS(clean, agent);
     else if (process.env.ELEVENLABS_API_KEY) audio = await elevenLabsTTS(clean, agent);
     else return res.status(404).json({ error: "no TTS provider configured" });
 
@@ -138,6 +196,37 @@ api.post("/tts", async (req, res) => {
     res.status(502).json({ error: String(err.message || err) });
   }
 });
+
+// Speech-to-text: the browser records an utterance and POSTs the raw audio
+// bytes here; Groq's Whisper transcribes it. Works in every browser (unlike
+// the Chromium-only Web Speech API). express.raw buffers the audio body —
+// the global express.json above ignores non-JSON content types, so the
+// stream reaches us intact.
+api.post(
+  "/stt",
+  express.raw({ type: ["audio/*", "application/octet-stream"], limit: "15mb" }),
+  async (req, res) => {
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(404).json({ error: "no STT provider configured" });
+    }
+    const audio = req.body;
+    if (!audio?.length) return res.status(400).json({ error: "audio required" });
+
+    try {
+      const ext = String(req.query.ext || "webm").replace(/[^a-z0-9]/gi, "").slice(0, 5) || "webm";
+      const text = await groqTranscribe(audio, {
+        filename: `speech.${ext}`,
+        language: process.env.GROQ_STT_LANGUAGE || undefined,
+        prompt:
+          process.env.GROQ_STT_PROMPT ||
+          "AYUS, Arjun, Meera, Kabir, Isha, Vikram. The founder speaks Hinglish — a casual mix of Hindi and English.",
+      });
+      res.json({ text });
+    } catch (err) {
+      res.status(502).json({ error: String(err.message || err) });
+    }
+  }
+);
 
 // Propose a new action (e.g. from Secretary Chat)
 api.post("/actions/propose", async (req, res) => {
