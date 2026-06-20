@@ -64,22 +64,36 @@ export function onSpeaking(fn) {
   return () => speakingListeners.delete(fn);
 }
 
+// --- TTS playback queue ---------------------------------------------------
+// A single queue plays clips back-to-back so streamed sentences never overlap.
+// Speaking state is bracketed by the caller (speak / speakStream*), not by each
+// clip, so it stays steady across sentence gaps while a reply streams in.
+let ttsQueue = [];
+let ttsDraining = false;
+let streamingTts = false; // a streamed reply is still arriving — keep the queue "open"
+let ttsDoneResolvers = [];
+
+function finalizeTts() {
+  notifySpeaking(false, null);
+  const resolvers = ttsDoneResolvers;
+  ttsDoneResolvers = [];
+  resolvers.forEach((r) => r());
+}
+
 export function stopSpeaking() {
   window.speechSynthesis?.cancel();
   if (currentAudio) {
     currentAudio.pause();
     currentAudio = null;
   }
-  notifySpeaking(false, null);
+  ttsQueue = [];
+  streamingTts = false;
+  finalizeTts();
 }
 
-/** Speak text in the given agent's voice. Resolves when speech ends. */
-export async function speak(text, agent = "ayus") {
-  const clean = cleanForSpeech(text);
-  if (!clean) return;
-  stopSpeaking();
-
-  // Try server TTS first (only succeeds when ELEVENLABS_API_KEY is configured)
+// Play ONE clip — server TTS (/api/tts) if available, else the browser's own
+// voice. Resolves when the clip ends. Does not touch speaking-state itself.
+async function playClip(clean, agent) {
   try {
     const { data } = await getSupabase().auth.getSession();
     const token = data?.session?.access_token;
@@ -90,25 +104,25 @@ export async function speak(text, agent = "ayus") {
     });
     if (res.ok) {
       const blob = await res.blob();
-      return await new Promise((resolve) => {
+      await new Promise((resolve) => {
         currentAudio = new Audio(URL.createObjectURL(blob));
-        notifySpeaking(true, agent);
         currentAudio.onended = currentAudio.onerror = () => {
-          notifySpeaking(false, agent);
+          currentAudio = null;
           resolve();
         };
         currentAudio.play().catch(() => {
-          notifySpeaking(false, agent);
+          currentAudio = null;
           resolve();
         });
       });
+      return;
     }
   } catch {
     /* fall through to browser voices */
   }
 
   if (!window.speechSynthesis) return;
-  return new Promise((resolve) => {
+  await new Promise((resolve) => {
     const u = new SpeechSynthesisUtterance(clean);
     const cfg = AGENT_VOICE[agent] || AGENT_VOICE.ayus;
     const voice = pickVoice(agent);
@@ -118,13 +132,58 @@ export async function speak(text, agent = "ayus") {
     }
     u.pitch = cfg.pitch;
     u.rate = cfg.rate;
-    u.onstart = () => notifySpeaking(true, agent);
-    u.onend = u.onerror = () => {
-      notifySpeaking(false, agent);
-      resolve();
-    };
+    u.onend = u.onerror = () => resolve();
     window.speechSynthesis.speak(u);
   });
+}
+
+async function drainTts() {
+  if (ttsDraining) return;
+  ttsDraining = true;
+  try {
+    while (ttsQueue.length) {
+      const { clean, agent } = ttsQueue.shift();
+      await playClip(clean, agent);
+    }
+  } finally {
+    ttsDraining = false;
+    // Done for now — but if a stream is still feeding sentences, stay "speaking".
+    if (!streamingTts && ttsQueue.length === 0) finalizeTts();
+  }
+}
+
+/** Speak text in the given agent's voice. Resolves when speech ends. */
+export async function speak(text, agent = "ayus") {
+  const clean = cleanForSpeech(text);
+  if (!clean) return;
+  stopSpeaking();
+  notifySpeaking(true, agent);
+  await playClip(clean, agent);
+  notifySpeaking(false, null);
+}
+
+// --- Streaming TTS: speak a reply sentence-by-sentence as it generates -------
+// Bracket a streamed reply with begin()/end(); feed completed sentences to
+// chunk(). Speaking stays true the whole time (even between sentences), and
+// whenTtsDone() resolves once the last sentence has finished playing.
+export function speakStreamBegin(agent = "ayus") {
+  stopSpeaking();
+  streamingTts = true;
+  notifySpeaking(true, agent);
+}
+export function speakStreamChunk(text, agent = "ayus") {
+  const clean = cleanForSpeech(text);
+  if (!clean) return;
+  ttsQueue.push({ clean, agent });
+  drainTts();
+}
+export function speakStreamEnd() {
+  streamingTts = false;
+  if (!ttsDraining && ttsQueue.length === 0) finalizeTts();
+}
+export function whenTtsDone() {
+  if (!ttsDraining && ttsQueue.length === 0 && !streamingTts) return Promise.resolve();
+  return new Promise((resolve) => ttsDoneResolvers.push(resolve));
 }
 
 /**

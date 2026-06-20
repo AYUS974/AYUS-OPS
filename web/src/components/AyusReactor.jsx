@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../lib/api.js";
-import { speak, stopSpeaking, createMicSession, onSpeaking, voiceSupport } from "../lib/voice.js";
+import { streamSecretaryChat } from "../lib/api.js";
+import {
+  stopSpeaking,
+  createMicSession,
+  onSpeaking,
+  voiceSupport,
+  speakStreamBegin,
+  speakStreamChunk,
+  speakStreamEnd,
+  whenTtsDone,
+} from "../lib/voice.js";
 import "./AyusReactor.css";
 
 /*
@@ -22,6 +31,26 @@ const STATE_SUB = {
   thinking: "thinking…",
   speaking: "speaking…",
 };
+
+// From a growing reply `full`, emit each newly-completed sentence past
+// `fromIndex` (so AYUS can speak it while the rest still streams in). Returns
+// the new index of consumed characters.
+function flushSentences(full, fromIndex, emit) {
+  const pending = full.slice(fromIndex);
+  let lastBoundary = -1;
+  for (let i = 0; i < pending.length; i++) {
+    if (".!?।\n".includes(pending[i])) lastBoundary = i;
+  }
+  if (lastBoundary < 0) return fromIndex;
+  pending
+    .slice(0, lastBoundary + 1)
+    .split(/(?<=[.!?।])\s+|\n+/)
+    .forEach((s) => {
+      const t = s.trim();
+      if (t) emit(t);
+    });
+  return fromIndex + lastBoundary + 1;
+}
 
 export default function AyusReactor({ variant = "band" }) {
   const canvasRef = useRef(null);
@@ -345,18 +374,47 @@ export default function AyusReactor({ variant = "band" }) {
     const history = [...historyRef.current, { role: "user", content: msg }].slice(-12);
     historyRef.current = history;
     persistHistory();
+
+    const voiceOn = localStorage.getItem("ayus_voice") !== "off";
+    let full = "";
+    let spokenIdx = 0;
+    let started = false;
+
     try {
-      const res = await api("/secretary/chat", {
-        method: "POST",
-        body: JSON.stringify({ messages: history }),
+      // Stream the reply: show it as it writes, and speak each finished sentence
+      // the moment it lands instead of waiting for the whole thing.
+      const done = await streamSecretaryChat(history, {
+        onDelta: (chunk) => {
+          if (!chunk) return;
+          if (!started) {
+            started = true;
+            go("speaking");
+            if (voiceOn) speakStreamBegin("ayus");
+          }
+          full += chunk;
+          setLastReply(full);
+          if (voiceOn) spokenIdx = flushSentences(full, spokenIdx, (s) => speakStreamChunk(s, "ayus"));
+        },
       });
-      const reply = res?.message || "…";
+
+      // The streamed `full` is what was spoken; `done.message` is the clean
+      // canonical reply (no cross-round preamble) — prefer it for display/history.
+      const reply = (done?.message || full).trim() || "…";
       historyRef.current = [...historyRef.current, { role: "assistant", content: reply }].slice(-12);
       persistHistory();
       setLastReply(reply);
-      await speak(reply, "ayus"); // onSpeaking flips state → speaking → standby
+
+      if (voiceOn && started) {
+        const tail = full.slice(spokenIdx).trim();
+        if (tail) speakStreamChunk(tail, "ayus"); // last partial sentence
+        speakStreamEnd();
+      } else {
+        go("standby");
+      }
+      await whenTtsDone(); // wait until AYUS has finished speaking the whole reply
       if (convoRef.current) scheduleReArm(); // always-on: listen again after replying
     } catch (err) {
+      stopSpeaking();
       setLastReply("My apologies — I couldn't reach the core. " + (err?.message || ""));
       go("standby");
       if (convoRef.current) scheduleReArm();

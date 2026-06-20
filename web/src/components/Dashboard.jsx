@@ -1039,6 +1039,7 @@ export default function Dashboard({ session }) {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem("ayus_nav_collapsed") === "1");
   const [speakingAgent, setSpeakingAgent] = useState(null);
+  const speakingRef = useRef(false); // so proactive alerts don't talk over a live reply
 
   const toggleNav = useCallback(() => {
     setNavCollapsed((c) => {
@@ -1051,7 +1052,54 @@ export default function Dashboard({ session }) {
   const [toast, setToast] = useState(null); // { msg, tone }
   const toastTimer = useRef(null);
 
-  useEffect(() => onSpeaking((isSpeaking, agent) => setSpeakingAgent(isSpeaking ? agent : null)), []);
+  useEffect(
+    () =>
+      onSpeaking((isSpeaking, agent) => {
+        speakingRef.current = isSpeaking;
+        setSpeakingAgent(isSpeaking ? agent : null);
+      }),
+    []
+  );
+
+  // Proactive alerts — near-real-time pings for things AYUS should flag the
+  // moment they happen (overdue invoices, important unread mail). Poll, dedupe
+  // by id across refreshes, toast each new one, and speak the top one (unless
+  // AYUS is already talking or voice is muted).
+  useEffect(() => {
+    let alive = true;
+    const SEEN_KEY = "ayus_seen_alerts";
+    let seen = new Set();
+    try {
+      seen = new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || "[]"));
+    } catch {
+      /* corrupt store — start fresh */
+    }
+
+    async function poll() {
+      try {
+        const { alerts = [] } = await api("/proactive");
+        if (!alive) return;
+        const fresh = alerts.filter((a) => a?.id && !seen.has(a.id));
+        if (!fresh.length) return;
+        fresh.forEach((a) => seen.add(a.id));
+        localStorage.setItem(SEEN_KEY, JSON.stringify([...seen].slice(-200)));
+        fresh.sort((a, b) => (b.severity === "high") - (a.severity === "high"));
+        fresh.forEach((a) => showToast(`🔔 ${a.title}`, a.severity === "high" ? "err" : "warn"));
+        if (localStorage.getItem("ayus_voice") !== "off" && !speakingRef.current) {
+          speak(fresh[0].speak || fresh[0].message, "ayus");
+        }
+      } catch {
+        /* offline / auth blip — retry next tick */
+      }
+    }
+
+    poll();
+    const t = setInterval(poll, 90000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [showToast]);
 
   // Surface the result of a Google OAuth round-trip, then clean the URL.
   useEffect(() => {

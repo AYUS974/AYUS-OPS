@@ -9,7 +9,7 @@ import { db } from "./lib/supabase.js";
 import { executeAction } from "./lib/executor.js";
 import { requireAuth } from "./lib/auth.js";
 import { runAll } from "./orchestrator.js";
-import { runSecretaryChat, runSecretaryChatGroq } from "./lib/secretaryAgent.js";
+import { runSecretaryChat, runSecretaryChatGroq, runSecretaryChatStream } from "./lib/secretaryAgent.js";
 import { learnFromDecision } from "./lib/memory.js";
 import { dispatchHandoffs } from "./lib/handoffs.js";
 import { notify, esc } from "./lib/notify.js";
@@ -18,6 +18,17 @@ import { googleRouter, googleCallback, isGoogleConnected, listRecentEmails } fro
 import { groqTranscribe } from "./lib/groq.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// A stray async rejection — most often a transient Avast-MITM TLS blip on an
+// outbound fetch (Supabase/Groq/Google) — must never take the whole server
+// down. Log it and keep serving; the next request just retries.
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", String(reason?.stack || reason?.message || reason).split("\n")[0]);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", String(err?.stack || err?.message || err).split("\n")[0]);
+});
+
 const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "100kb" }));
@@ -85,6 +96,62 @@ api.post("/secretary/chat", async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// Streaming chat — same brain as /secretary/chat, but pushes Server-Sent Events
+// so the reply appears (and is spoken) token-by-token. Events:
+//   {type:"delta", text}  — a chunk of the reply
+//   {type:"tool",  line}  — a tool was used
+//   {type:"done",  message, toolEvents, hasSuggestion, suggestedAction}
+//   {type:"error", error}
+api.post("/secretary/chat/stream", async (req, res) => {
+  const { messages } = req.body || {};
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({ error: "messages array is required" });
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+  const sse = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  try {
+    let result;
+    if (process.env.GROQ_API_KEY) {
+      try {
+        result = await runSecretaryChatStream(messages, {
+          onDelta: (text) => sse({ type: "delta", text }),
+          onToolEvent: (line) => sse({ type: "tool", line }),
+        });
+      } catch (groqErr) {
+        // Groq throttled/failed mid-stream — fall back to Gemini (non-streaming),
+        // emitting the whole answer as one delta so the client still gets it.
+        if (!process.env.GEMINI_API_KEY) throw groqErr;
+        console.warn(
+          "[secretary] Groq stream failed — falling back to Gemini:",
+          String(groqErr.message || groqErr).slice(0, 160)
+        );
+        result = await runSecretaryChat(messages);
+        sse({ type: "delta", text: result.message });
+      }
+    } else {
+      result = await runSecretaryChat(messages);
+      sse({ type: "delta", text: result.message });
+    }
+
+    sse({
+      type: "done",
+      message: result.message,
+      toolEvents: result.toolEvents || [],
+      hasSuggestion: Boolean(result.suggestedAction),
+      suggestedAction: result.suggestedAction || null,
+    });
+    res.end();
+  } catch (err) {
+    sse({ type: "error", error: String(err.message || err) });
+    res.end();
   }
 });
 
@@ -300,6 +367,60 @@ api.get("/analytics", async (_req, res) => {
   } catch (err) {
     res.status(500).json({ error: String(err.message || err) });
   }
+});
+
+// Proactive alerts — things AYUS should flag the moment they happen (overdue
+// invoices, important unread mail). The frontend polls this every ~90s, dedupes
+// by alert id, and has AYUS speak/toast anything new. Each branch is isolated so
+// one failing source (e.g. Google) never blanks the others.
+api.get("/proactive", async (_req, res) => {
+  const alerts = [];
+
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const { data: invoices } = await db
+      .from("invoices")
+      .select("id,client_name,amount,currency,due_date,status")
+      .eq("status", "unpaid")
+      .lt("due_date", today);
+    for (const inv of invoices || []) {
+      const days = Math.max(
+        1,
+        Math.floor((Date.now() - new Date(inv.due_date).getTime()) / 86_400_000)
+      );
+      alerts.push({
+        id: `invoice:${inv.id}`,
+        kind: "invoice_overdue",
+        severity: days >= 7 ? "high" : "medium",
+        title: `Invoice overdue — ${inv.client_name || "client"}`,
+        message: `${inv.client_name || "A client"}'s invoice of ${inv.amount} ${inv.currency || "INR"} is ${days} day${days === 1 ? "" : "s"} overdue.`,
+        speak: `Heads up, sir — ${inv.client_name || "a client"}'s invoice of ${inv.amount} ${inv.currency || "rupees"} is ${days} day${days === 1 ? "" : "s"} overdue.`,
+      });
+    }
+  } catch {
+    /* invoice source unavailable — skip, keep other alerts */
+  }
+
+  try {
+    if (await isGoogleConnected()) {
+      const emails = await listRecentEmails({ q: "is:unread is:important newer_than:2d", maxResults: 5 });
+      for (const m of emails || []) {
+        const sender = (m.from || "someone").replace(/<.*?>/, "").trim();
+        alerts.push({
+          id: `mail:${m.id}`,
+          kind: "important_email",
+          severity: "medium",
+          title: `Important email — ${sender}`,
+          message: `${m.subject || "(no subject)"} — from ${sender}.`,
+          speak: `New important email from ${sender}: ${m.subject || "no subject"}.`,
+        });
+      }
+    }
+  } catch {
+    /* Google momentarily unavailable — skip */
+  }
+
+  res.json({ alerts, ts: new Date().toISOString() });
 });
 
 // Google (Gmail + Calendar) connect/status/disconnect lives on its own router.

@@ -40,3 +40,56 @@ export async function api(path, options = {}) {
   if (!res.ok || body.error) throw new Error(body.error || `request failed (${res.status})`);
   return body;
 }
+
+/**
+ * Stream a chat reply from /api/secretary/chat/stream (Server-Sent Events).
+ * Calls onDelta(textChunk) as tokens arrive and onTool(line) on tool use;
+ * resolves to the final { message, toolEvents, hasSuggestion, suggestedAction }.
+ */
+export async function streamSecretaryChat(messages, { onDelta, onTool } = {}) {
+  const { data } = await getSupabase().auth.getSession();
+  const token = data?.session?.access_token;
+
+  const res = await fetch("/api/secretary/chat/stream", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ messages }),
+  });
+  if (!res.ok || !res.body) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `request failed (${res.status})`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let done = null;
+
+  // SSE frames are separated by a blank line; each carries one `data:` JSON line.
+  for (;;) {
+    const { value, done: streamEnded } = await reader.read();
+    if (streamEnded) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep;
+    while ((sep = buf.indexOf("\n\n")) >= 0) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
+      if (!dataLine) continue;
+      let evt;
+      try {
+        evt = JSON.parse(dataLine.slice(5).trim());
+      } catch {
+        continue;
+      }
+      if (evt.type === "delta") onDelta?.(evt.text);
+      else if (evt.type === "tool") onTool?.(evt.line);
+      else if (evt.type === "done") done = evt;
+      else if (evt.type === "error") throw new Error(evt.error);
+    }
+  }
+  return done;
+}

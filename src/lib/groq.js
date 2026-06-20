@@ -72,6 +72,68 @@ export async function groqChat(messages, tools, { maxTokens = 1200, temperature 
 }
 
 /**
+ * Streaming variant of groqChat. Calls `onDelta(textChunk)` as text tokens
+ * arrive, assembles any tool calls across chunks, and resolves to the same
+ * `{ content, tool_calls }` shape once the stream ends. This is what lets AYUS
+ * start speaking before the full reply is generated.
+ */
+export async function groqChatStream(messages, tools, { onDelta, maxTokens = 1200, temperature = 0.4 } = {}) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY is not set (get one at console.groq.com)");
+
+  const body = { model: MODEL, max_tokens: maxTokens, temperature, messages, stream: true };
+  if (tools?.length) {
+    body.tools = tools;
+    body.tool_choice = "auto";
+  }
+
+  const res = await fetch(URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Groq API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+
+  let content = "";
+  const toolCalls = []; // assembled by streamed index
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  for await (const chunk of res.body) {
+    buf += decoder.decode(chunk, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      let json;
+      try {
+        json = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      const delta = json.choices?.[0]?.delta;
+      if (!delta) continue;
+      if (delta.content) {
+        content += delta.content;
+        onDelta?.(delta.content);
+      }
+      for (const tc of delta.tool_calls || []) {
+        const i = tc.index ?? 0;
+        if (!toolCalls[i]) toolCalls[i] = { id: tc.id, type: "function", function: { name: "", arguments: "" } };
+        if (tc.id) toolCalls[i].id = tc.id;
+        if (tc.function?.name) toolCalls[i].function.name += tc.function.name;
+        if (tc.function?.arguments) toolCalls[i].function.arguments += tc.function.arguments;
+      }
+    }
+  }
+
+  return { content, tool_calls: toolCalls.filter(Boolean) };
+}
+
+/**
  * Same contract as claudeJSON / geminiJSON, backed by the Groq API
  * (OpenAI-compatible Chat Completions). Structured output is enforced via
  * forced tool calling, so the reply is guaranteed valid JSON in the requested shape.

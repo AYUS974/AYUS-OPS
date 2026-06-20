@@ -1,6 +1,6 @@
 import { db } from "./supabase.js";
 import { geminiGenerate } from "./gemini.js";
-import { groqChat } from "./groq.js";
+import { groqChat, groqChatStream } from "./groq.js";
 import { PC_TOOL_DECLARATIONS, PC_TOOL_HANDLERS, ALLOWED_DIRS } from "./pc-tools.js";
 import { memoryBlock, remember } from "./memory.js";
 import { isGoogleConnected, listRecentEmails, listUpcomingEvents } from "./google.js";
@@ -307,6 +307,69 @@ export async function runSecretaryChatGroq(messages) {
       const { result, suggestedAction: sa } = await execTool(name, args);
       if (sa) suggestedAction = sa;
       toolEvents.push(toolEventLine(name, args, result));
+      chatMessages.push({
+        role: "tool",
+        tool_call_id: call.id,
+        name,
+        content: JSON.stringify(result).slice(0, 4000),
+      });
+    }
+  }
+
+  return {
+    message: "That took rather more steps than expected, sir — could you simplify the request and try again?",
+    toolEvents,
+    suggestedAction,
+  };
+}
+
+// Streaming version of the Groq chat loop. Identical tool behaviour, but the
+// final answer's tokens are pushed to `onDelta` as they generate (and tool
+// activity to `onToolEvent`), so the UI can show — and AYUS can speak — the
+// reply before it's fully written. Returns the same final shape.
+export async function runSecretaryChatStream(messages, { onDelta, onToolEvent } = {}) {
+  const snapshot = await companySnapshot();
+  const history = messages.slice(-10);
+  const chatMessages = [
+    { role: "system", content: SYSTEM },
+    ...history.map((m, i, arr) => ({
+      role: m.role === "user" ? "user" : "assistant",
+      content:
+        i === arr.length - 1 && m.role === "user" ? `${snapshot}\n\nFounder says: ${m.content}` : m.content,
+    })),
+  ];
+
+  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, PROPOSE_TOOL, REMEMBER_TOOL]);
+  const toolEvents = [];
+  let suggestedAction = null;
+
+  for (let round = 0; round < 6; round++) {
+    const msg = await groqChatStream(chatMessages, tools, { onDelta });
+    const calls = msg.tool_calls || [];
+
+    if (calls.length === 0) {
+      return {
+        message: (msg.content || "").trim() || "Apologies, sir — I didn't quite catch that. Could you rephrase?",
+        toolEvents,
+        suggestedAction,
+      };
+    }
+
+    chatMessages.push({ role: "assistant", content: msg.content || "", tool_calls: calls });
+
+    for (const call of calls) {
+      const name = call.function?.name;
+      let args = {};
+      try {
+        args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
+      } catch {
+        /* malformed args — pass through as empty */
+      }
+      const { result, suggestedAction: sa } = await execTool(name, args);
+      if (sa) suggestedAction = sa;
+      const line = toolEventLine(name, args, result);
+      toolEvents.push(line);
+      onToolEvent?.(line);
       chatMessages.push({
         role: "tool",
         tool_call_id: call.id,
