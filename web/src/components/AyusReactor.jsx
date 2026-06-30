@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { streamSecretaryChat } from "../lib/api.js";
+import { streamSecretaryChat, getConfig } from "../lib/api.js";
 import {
+  speak,
   stopSpeaking,
   createMicSession,
   onSpeaking,
@@ -9,6 +10,7 @@ import {
   speakStreamChunk,
   speakStreamEnd,
   whenTtsDone,
+  createGeminiLiveSession,
 } from "../lib/voice.js";
 import "./AyusReactor.css";
 
@@ -52,11 +54,10 @@ function flushSentences(full, fromIndex, emit) {
   return fromIndex + lastBoundary + 1;
 }
 
-export default function AyusReactor({ variant = "band" }) {
+export default function AyusReactor({ variant = "band", onOpenChat }) {
   const canvasRef = useRef(null);
   const [state, setState] = useState("standby");
   const [listening, setListening] = useState(false);
-  const [interim, setInterim] = useState("");
   const [lastUser, setLastUser] = useState("");
   const [lastReply, setLastReply] = useState("");
   const [input, setInput] = useState("");
@@ -365,12 +366,16 @@ export default function AyusReactor({ variant = "band" }) {
   async function send(text) {
     const msg = (text || "").trim();
     if (!msg) return;
-    setInterim("");
     setLastUser(msg);
     setLastReply("");
+
+    // If WebSocket session is open and active, send text over WebSocket!
+    if (sessionRef.current && sessionRef.current.sendText) {
+      sessionRef.current.sendText(msg);
+      return;
+    }
+
     go("thinking");
-    // Keep a rolling window of the last ~12 turns so AYUS has conversation
-    // context (the backend further trims + injects the live company snapshot).
     const history = [...historyRef.current, { role: "user", content: msg }].slice(-12);
     historyRef.current = history;
     persistHistory();
@@ -381,8 +386,6 @@ export default function AyusReactor({ variant = "band" }) {
     let started = false;
 
     try {
-      // Stream the reply: show it as it writes, and speak each finished sentence
-      // the moment it lands instead of waiting for the whole thing.
       const done = await streamSecretaryChat(history, {
         onDelta: (chunk) => {
           if (!chunk) return;
@@ -397,22 +400,61 @@ export default function AyusReactor({ variant = "band" }) {
         },
       });
 
-      // The streamed `full` is what was spoken; `done.message` is the clean
-      // canonical reply (no cross-round preamble) — prefer it for display/history.
       const reply = (done?.message || full).trim() || "…";
-      historyRef.current = [...historyRef.current, { role: "assistant", content: reply }].slice(-12);
-      persistHistory();
-      setLastReply(reply);
+      const isReport = reply.includes("===") || reply.includes("---") || reply.includes("##") || reply.length > 500;
 
-      if (voiceOn && started) {
-        const tail = full.slice(spokenIdx).trim();
-        if (tail) speakStreamChunk(tail, "ayus"); // last partial sentence
-        speakStreamEnd();
+      if (isReport) {
+        if (voiceOn) stopSpeaking();
+
+        // 1. Sync report to the sidebar chat drawer history
+        try {
+          const sidebarSaved = JSON.parse(localStorage.getItem("ayus_chat_history") || "[]");
+          const updatedSidebar = [
+            ...sidebarSaved,
+            { role: "user", content: msg, timestamp: new Date().toISOString() },
+            {
+              role: "assistant",
+              content: reply,
+              timestamp: new Date().toISOString(),
+              toolEvents: done?.toolEvents || [],
+              suggestedAction: done?.suggestedAction || null
+            }
+          ].slice(-30);
+          localStorage.setItem("ayus_chat_history", JSON.stringify(updatedSidebar));
+        } catch (e) {
+          console.error("Failed to sync research report to sidebar:", e);
+        }
+
+        // 2. Persist HUD reactor history
+        historyRef.current = [...historyRef.current, { role: "assistant", content: "I've compiled the research report for you in the sidebar chat." }].slice(-12);
+        persistHistory();
+
+        // 3. Open the sidebar chat drawer
+        if (onOpenChat) onOpenChat();
+
+        // 4. Speak a brief summary
+        const shortMsg = `Here is the research report compiled by Arjun, sir. I have opened the sidebar chat so you can read the full document.`;
+        setLastReply(shortMsg);
+        if (voiceOn) {
+          await speak(shortMsg, "ayus");
+        } else {
+          go("standby");
+        }
       } else {
-        go("standby");
+        historyRef.current = [...historyRef.current, { role: "assistant", content: reply }].slice(-12);
+        persistHistory();
+        setLastReply(reply);
+
+        if (voiceOn && started) {
+          const tail = full.slice(spokenIdx).trim();
+          if (tail) speakStreamChunk(tail, "ayus");
+          speakStreamEnd();
+        } else {
+          go("standby");
+        }
       }
-      await whenTtsDone(); // wait until AYUS has finished speaking the whole reply
-      if (convoRef.current) scheduleReArm(); // always-on: listen again after replying
+      await whenTtsDone();
+      if (convoRef.current) scheduleReArm();
     } catch (err) {
       stopSpeaking();
       setLastReply("My apologies — I couldn't reach the core. " + (err?.message || ""));
@@ -421,47 +463,80 @@ export default function AyusReactor({ variant = "band" }) {
     }
   }
 
-  // Records one utterance with MediaRecorder + voice-activity detection and
-  // transcribes it server-side via Groq Whisper (/api/stt) — works in every
-  // browser, unlike the old Chromium-only Web Speech API.
   function startListening() {
-    if (sessionRef.current) return; // a turn is already live
+    if (sessionRef.current) return;
     if (!support.stt) return;
     stopSpeaking();
     micLevelRef.current = 0;
-    sessionRef.current = createMicSession({
-      onListening: () => {
-        setListening(true);
-        go("listening");
-      },
-      onLevel: (rms) => {
-        micLevelRef.current = rms; // feeds the reactor's listening pulse
-      },
-      onResult: (text) => send(text),
-      onEnd: (gotSpeech) => {
-        setListening(false);
-        micLevelRef.current = 0;
-        sessionRef.current = null;
-        if (stateRef.current === "listening") go("standby");
-        // Always-on: heard nothing this turn → just keep listening.
-        if (convoRef.current && !gotSpeech) scheduleReArm(300);
-      },
-      onError: (err) => {
-        setListening(false);
-        micLevelRef.current = 0;
-        sessionRef.current = null;
-        go("standby");
-        setLastReply(
-          err === "not-allowed"
-            ? "Allow microphone access so I can hear you, sir."
-            : err === "transcribe-failed"
-              ? "I didn't catch that — please try again."
-              : "I couldn't open the microphone."
-        );
-        // A transient hiccup shouldn't kill the conversation — try again.
-        if (convoRef.current && err === "transcribe-failed") scheduleReArm(500);
-      },
-    });
+    
+    const liveEnabled = getConfig().geminiLiveEnabled;
+    console.log("[AyusReactor] Gemini Live Enabled config:", liveEnabled);
+
+    if (liveEnabled) {
+      let textBuffer = "";
+      sessionRef.current = createGeminiLiveSession({
+        onListening: () => {
+          setListening(true);
+          go("listening");
+        },
+        onLevel: (rms) => {
+          micLevelRef.current = rms;
+        },
+        onUserText: (text) => {
+          setLastUser(text);
+        },
+        onText: (text) => {
+          textBuffer += text;
+          setLastReply(textBuffer);
+          go("speaking");
+        },
+        onEnd: () => {
+          setListening(false);
+          micLevelRef.current = 0;
+          sessionRef.current = null;
+          go("standby");
+        },
+        onError: (err) => {
+          setListening(false);
+          micLevelRef.current = 0;
+          sessionRef.current = null;
+          go("standby");
+          setLastReply("Voice chat connection lost or failed to start.");
+        }
+      });
+    } else {
+      sessionRef.current = createMicSession({
+        onListening: () => {
+          setListening(true);
+          go("listening");
+        },
+        onLevel: (rms) => {
+          micLevelRef.current = rms;
+        },
+        onResult: (text) => send(text),
+        onEnd: (gotSpeech) => {
+          setListening(false);
+          micLevelRef.current = 0;
+          sessionRef.current = null;
+          if (stateRef.current === "listening") go("standby");
+          if (convoRef.current && !gotSpeech) scheduleReArm(300);
+        },
+        onError: (err) => {
+          setListening(false);
+          micLevelRef.current = 0;
+          sessionRef.current = null;
+          go("standby");
+          setLastReply(
+            err === "not-allowed"
+              ? "Allow microphone access so I can hear you, sir."
+              : err === "transcribe-failed"
+                ? "I didn't catch that — please try again."
+                : "I couldn't open the microphone."
+          );
+          if (convoRef.current && err === "transcribe-failed") scheduleReArm(500);
+        },
+      });
+    }
   }
 
   // Re-open the mic shortly, as long as conversation mode is still on and no
@@ -527,9 +602,7 @@ export default function AyusReactor({ variant = "band" }) {
         </div>
 
         <div className="ayus-reactor-transcript">
-          {listening && interim ? (
-            <div className="interim">{interim}</div>
-          ) : lastUser || lastReply ? (
+          {lastUser || lastReply ? (
             <>
               {lastUser && <div className="axu"><b>YOU</b> &nbsp;{lastUser}</div>}
               {lastReply && <div className="axr"><b>AYUS</b> &nbsp;{lastReply}</div>}
@@ -553,6 +626,7 @@ export default function AyusReactor({ variant = "band" }) {
               {convo ? (listening ? "◉ LISTENING" : "◉ LIVE") : "◉ TALK"}
             </button>
           )}
+
           <input
             className="ayus-reactor-input"
             placeholder="…or type to AYUS and press Enter"

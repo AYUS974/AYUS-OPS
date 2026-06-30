@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 
 let supabase = null;
+let config = {};
 
 /**
  * The server hands the frontend its Supabase URL + anon key at runtime
@@ -9,12 +10,18 @@ let supabase = null;
 export async function initSupabase() {
   const res = await fetch("/api/config");
   if (!res.ok) throw new Error("could not reach the server");
-  const { supabaseUrl, supabaseAnonKey } = await res.json();
+  const data = await res.json();
+  const { supabaseUrl, supabaseAnonKey } = data;
   if (!supabaseUrl || !supabaseAnonKey) {
     throw new Error("Server is missing SUPABASE_URL / SUPABASE_ANON_KEY in its .env");
   }
+  config = data;
   supabase = createClient(supabaseUrl, supabaseAnonKey);
   return supabase;
+}
+
+export function getConfig() {
+  return config;
 }
 
 export function getSupabase() {

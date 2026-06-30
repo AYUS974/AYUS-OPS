@@ -5,17 +5,34 @@ import cron from "node-cron";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { WebSocketServer, WebSocket } from "ws";
 import { db } from "./lib/supabase.js";
 import { executeAction } from "./lib/executor.js";
 import { requireAuth } from "./lib/auth.js";
 import { runAll } from "./orchestrator.js";
-import { runSecretaryChat, runSecretaryChatGroq, runSecretaryChatStream } from "./lib/secretaryAgent.js";
+import {
+  runSecretaryChat,
+  runSecretaryChatGroq,
+  runSecretaryChatStream,
+  runSecretaryChatGlm,
+  runSecretaryChatGlmStream,
+  SYSTEM,
+  GOOGLE_READ_TOOLS,
+  REMEMBER_TOOL,
+  PROPOSE_TOOL,
+  SPOTIFY_TOOL,
+  execTool,
+  companySnapshot,
+} from "./lib/secretaryAgent.js";
+import { PC_TOOL_DECLARATIONS } from "./lib/pc-tools.js";
 import { learnFromDecision } from "./lib/memory.js";
 import { dispatchHandoffs } from "./lib/handoffs.js";
 import { notify, esc } from "./lib/notify.js";
 import { buildAnalytics } from "./lib/analytics.js";
 import { googleRouter, googleCallback, isGoogleConnected, listRecentEmails } from "./lib/google.js";
+import { spotifyRouter, spotifyCallback } from "./lib/spotify.js";
 import { groqTranscribe } from "./lib/groq.js";
+import { edgeTTS } from "./lib/edge-tts.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,12 +62,14 @@ app.get("/api/config", (_req, res) => {
   res.json({
     supabaseUrl: process.env.SUPABASE_URL || "",
     supabaseAnonKey: process.env.SUPABASE_ANON_KEY || "",
+    geminiLiveEnabled: process.env.GEMINI_LIVE_ENABLED === "true",
   });
 });
 
 // Google OAuth callback is public — Google redirects the browser here with no
 // auth header. Registered before the authenticated /api router so it matches first.
 app.get("/api/google/callback", googleCallback);
+app.get("/api/spotify/callback", spotifyCallback);
 
 // ---------- Authenticated API ----------
 
@@ -72,7 +91,20 @@ api.post("/secretary/chat", async (req, res) => {
     // free tier also throttles (429 "rate limit reached"); when it does, fall
     // back to Gemini so AYUS stays responsive instead of dead-ending.
     let result;
-    if (process.env.GROQ_API_KEY) {
+    const provider = (process.env.LLM_PROVIDER || "").toLowerCase();
+
+    if (provider === "glm" && (process.env.ZHIPU_API_KEY || process.env.GLM_API_KEY)) {
+      try {
+        result = await runSecretaryChatGlm(messages);
+      } catch (glmErr) {
+        console.warn("[secretary] GLM chat failed — falling back to Groq/Gemini:", glmErr.message);
+        if (process.env.GROQ_API_KEY) {
+          result = await runSecretaryChatGroq(messages);
+        } else {
+          result = await runSecretaryChat(messages);
+        }
+      }
+    } else if (process.env.GROQ_API_KEY) {
       try {
         result = await runSecretaryChatGroq(messages);
       } catch (groqErr) {
@@ -119,15 +151,30 @@ api.post("/secretary/chat/stream", async (req, res) => {
 
   try {
     let result;
-    if (process.env.GROQ_API_KEY) {
+    const provider = (process.env.LLM_PROVIDER || "").toLowerCase();
+
+    if (provider === "glm" && (process.env.ZHIPU_API_KEY || process.env.GLM_API_KEY)) {
+      try {
+        result = await runSecretaryChatGlmStream(messages, {
+          onDelta: (text) => sse({ type: "delta", text }),
+          onToolEvent: (line) => sse({ type: "tool", line }),
+        });
+      } catch (glmErr) {
+        console.warn("[secretary] GLM stream failed — falling back to non-streaming Gemini/Groq:", glmErr.message);
+        if (process.env.GROQ_API_KEY) {
+          result = await runSecretaryChatGroq(messages);
+        } else {
+          result = await runSecretaryChat(messages);
+        }
+        sse({ type: "delta", text: result.message });
+      }
+    } else if (process.env.GROQ_API_KEY) {
       try {
         result = await runSecretaryChatStream(messages, {
           onDelta: (text) => sse({ type: "delta", text }),
           onToolEvent: (line) => sse({ type: "tool", line }),
         });
       } catch (groqErr) {
-        // Groq throttled/failed mid-stream — fall back to Gemini (non-streaming),
-        // emitting the whole answer as one delta so the client still gets it.
         if (!process.env.GEMINI_API_KEY) throw groqErr;
         console.warn(
           "[secretary] Groq stream failed — falling back to Gemini:",
@@ -254,11 +301,27 @@ api.post("/tts", async (req, res) => {
     if (process.env.SARVAM_API_KEY) audio = await sarvamTTS(clean, agent);
     else if (process.env.CARTESIA_API_KEY) audio = await cartesiaTTS(clean, agent);
     else if (process.env.ELEVENLABS_API_KEY) audio = await elevenLabsTTS(clean, agent);
-    else return res.status(404).json({ error: "no TTS provider configured" });
+    else {
+      // Edge-TTS: free, no API key — natural Hindi/English voices from
+      // Microsoft Edge's public TTS service. Falls through to 502 → browser
+      // voices only if Edge-TTS itself fails (network down, etc.).
+      try {
+        audio = await edgeTTS(clean, agent);
+      } catch (edgeErr) {
+        console.warn("[tts] Edge-TTS failed:", String(edgeErr.message || edgeErr).slice(0, 120));
+        return res.status(502).json({ error: "no TTS provider available" });
+      }
+    }
 
     res.set("Content-Type", "audio/mpeg");
     res.send(audio);
   } catch (err) {
+    // Paid provider failed — try Edge-TTS as rescue fallback before giving up.
+    try {
+      const rescue = await edgeTTS(clean, agent);
+      res.set("Content-Type", "audio/mpeg");
+      return res.send(rescue);
+    } catch { /* fall through */ }
     // 502 → the browser voice fallback kicks in client-side
     res.status(502).json({ error: String(err.message || err) });
   }
@@ -426,6 +489,9 @@ api.get("/proactive", async (_req, res) => {
 // Google (Gmail + Calendar) connect/status/disconnect lives on its own router.
 api.use("/google", googleRouter);
 
+// Spotify connect/status/disconnect (real "play this exact song").
+api.use("/spotify", spotifyRouter);
+
 // Approve or reject a pending action. Approval executes it immediately.
 api.post("/actions/:id/decide", async (req, res) => {
   const { id } = req.params;
@@ -531,17 +597,241 @@ cron.schedule(schedule, async () => {
   }
 });
 
+// ---------- WebSocket Server for Gemini Multimodal Live API ----------
+const wss = new WebSocketServer({ noServer: true });
+
+wss.on("connection", async (ws, request) => {
+  console.log("[ws] Client connected to live audio socket");
+  
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    console.error("[ws] GEMINI_API_KEY is not set");
+    ws.close(1011, "GEMINI_API_KEY is not set");
+    return;
+  }
+
+  const model = process.env.GEMINI_LIVE_MODEL || "models/gemini-2.0-flash-realtime-exp";
+  const geminiUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+  
+  console.log(`[ws] Connecting to Gemini Live API with model: ${model}`);
+  const geminiWs = new WebSocket(geminiUrl);
+
+  // Send the setup config as soon as Gemini connection opens
+  geminiWs.on("open", async () => {
+    console.log("[ws] Gemini Live connection open. Sending setup config...");
+    
+    // Build system instruction including company snapshot
+    const snapshot = await companySnapshot();
+    const fullSystemInstruction = `${SYSTEM}\n\n${snapshot}`;
+
+    // Helper to uppercase schema types recursively for Gemini validation
+    function uppercaseSchemaTypes(schema) {
+      if (!schema || typeof schema !== "object") return schema;
+      const newSchema = { ...schema };
+      if (typeof newSchema.type === "string") {
+        newSchema.type = newSchema.type.toUpperCase();
+      }
+      if (newSchema.properties && typeof newSchema.properties === "object") {
+        const newProps = {};
+        for (const [key, val] of Object.entries(newSchema.properties)) {
+          newProps[key] = uppercaseSchemaTypes(val);
+        }
+        newSchema.properties = newProps;
+      }
+      if (newSchema.items && typeof newSchema.items === "object") {
+        newSchema.items = uppercaseSchemaTypes(newSchema.items);
+      }
+      return newSchema;
+    }
+
+    // Format tools for Gemini Live API (expects standard tool declarations)
+    const rawTools = [...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, SPOTIFY_TOOL, PROPOSE_TOOL, REMEMBER_TOOL];
+    const formattedTools = [
+      {
+        functionDeclarations: rawTools.map(t => {
+          const decl = {
+            name: t.name,
+            description: t.description,
+          };
+          if (t.parameters && t.parameters.properties && Object.keys(t.parameters.properties).length > 0) {
+            decl.parameters = uppercaseSchemaTypes(t.parameters);
+          }
+          return decl;
+        })
+      }
+    ];
+
+    const setupMsg = {
+      setup: {
+        model,
+        generationConfig: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: "Aoede" // Or Fenrir, Kore, Puck, Charon
+              }
+            }
+          }
+        },
+        systemInstruction: {
+          parts: [{ text: fullSystemInstruction }]
+        },
+        tools: formattedTools
+      }
+    };
+
+    geminiWs.send(JSON.stringify(setupMsg));
+  });
+
+  geminiWs.on("message", (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+      
+      // Handle tool call if requested by Gemini
+      if (msg.toolCall) {
+        const calls = msg.toolCall.functionCalls || [];
+        for (const call of calls) {
+          const { name, args, id } = call;
+          console.log(`[ws] Tool call requested by Gemini: ${name}(${JSON.stringify(args)})`);
+          
+          execTool(name, args).then(({ result }) => {
+            console.log(`[ws] Tool execution result:`, result);
+            const responseMsg = {
+              toolResponse: {
+                functionResponses: [
+                  {
+                    response: { output: result },
+                    id
+                  }
+                ]
+              }
+            };
+            if (geminiWs.readyState === WebSocket.OPEN) {
+              geminiWs.send(JSON.stringify(responseMsg));
+            }
+          }).catch(err => {
+            console.error(`[ws] Tool execution failed:`, err);
+            const responseMsg = {
+              toolResponse: {
+                functionResponses: [
+                  {
+                    response: { output: { ok: false, error: String(err.message || err) } },
+                    id
+                  }
+                ]
+              }
+            };
+            if (geminiWs.readyState === WebSocket.OPEN) {
+              geminiWs.send(JSON.stringify(responseMsg));
+            }
+          });
+        }
+        return; // Don't forward toolCall directly to browser
+      }
+
+      // Forward standard serverContent (contains text / audio) or setupComplete to browser client
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+      }
+    } catch (err) {
+      console.error("[ws] Error parsing/handling Gemini message:", err);
+    }
+  });
+
+  geminiWs.on("error", (err) => {
+    console.error("[ws] Gemini Live WebSocket error:", err);
+    ws.close(1011, "Gemini connection error");
+  });
+
+  geminiWs.on("close", (code, reason) => {
+    console.log(`[ws] Gemini Live closed connection: ${code} - ${reason}`);
+    ws.close(code, reason);
+  });
+
+  // Client messages from Browser to Backend
+  ws.on("message", (data, isBinary) => {
+    if (isBinary) {
+      // Browser streams raw PCM (16kHz, mono, 16-bit) -> forward as Base64 to Gemini
+      const base64Data = data.toString("base64");
+      const audioInputMsg = {
+        realtimeInput: {
+          mediaChunks: [
+            {
+              mimeType: "audio/pcm",
+              data: base64Data
+            }
+          ]
+        }
+      };
+      if (geminiWs.readyState === WebSocket.OPEN) {
+        geminiWs.send(JSON.stringify(audioInputMsg));
+      }
+    } else {
+      // Forward text messages (like typing or client control messages) to Gemini
+      try {
+        const text = data.toString();
+        if (geminiWs.readyState === WebSocket.OPEN) {
+          geminiWs.send(text);
+        }
+      } catch (err) {
+        console.error("[ws] Error forwarding text message to Gemini:", err);
+      }
+    }
+  });
+
+  ws.on("error", (err) => {
+    console.error("[ws] Browser WebSocket client error:", err);
+    geminiWs.close();
+  });
+
+  ws.on("close", () => {
+    console.log("[ws] Client disconnected from live audio socket");
+    geminiWs.close();
+  });
+});
+
 const port = process.env.PORT || 3000;
 const server = app.listen(port, () => {
   console.log(`AYUS Ops running → http://localhost:${port}`);
   console.log(`Agents scheduled: "${schedule}" (set DAILY_CRON in .env to change)`);
 });
 
-// Graceful shutdown so Render/Railway deploys don't cut requests mid-flight
-for (const sig of ["SIGTERM", "SIGINT"]) {
-  process.on(sig, () => {
-    console.log(`[server] ${sig} received, shutting down`);
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(1), 10_000).unref();
-  });
+// Upgrade HTTP requests on /api/secretary/live to WebSocket Server
+server.on("upgrade", (request, socket, head) => {
+  const url = new URL(request.url, `http://${request.headers.host}`);
+  if (url.pathname === "/api/secretary/live") {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit("connection", ws, request);
+    });
+  } else {
+    socket.destroy();
+  }
+});
+
+// On `node --watch` (and fast manual restarts) a fresh process can try to bind
+// before the previous one has released the port. Instead of crashing the whole
+// server, wait a beat and retry the bind so the restart self-heals.
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.warn(`[server] port ${port} still busy — retrying in 1s…`);
+    setTimeout(() => server.listen(port), 1000);
+  } else {
+    throw err;
+  }
+});
+
+// Graceful shutdown so Render/Railway deploys don't cut requests mid-flight.
+// Critically, force-close any keep-alive HTTP
+// sockets — otherwise server.close() blocks on them and the old process keeps
+// holding port 3000, making every --watch restart collide with EADDRINUSE.
+let shuttingDown = false;
+function shutdown(sig) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[server] ${sig} received, shutting down`);
+  server.closeAllConnections?.();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 2000).unref();
 }
+for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => shutdown(sig));

@@ -124,6 +124,7 @@
   border-color: var(--ax);
   box-shadow: 0 0 22px color-mix(in srgb, var(--ax) 45%, transparent);
 }
+
 .ayus-reactor-input {
   flex: 1;
   min-width: 120px;

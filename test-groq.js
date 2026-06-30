@@ -1,3 +1,4 @@
+import "./src/lib/ca.js";
 import "dotenv/config";
 import { groqChat } from "./src/lib/groq.js";
 

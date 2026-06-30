@@ -1,3 +1,4 @@
+import "./lib/ca.js";
 import "dotenv/config";
 import { db } from "./lib/supabase.js";
 import { llmJSON } from "./lib/llm.js";

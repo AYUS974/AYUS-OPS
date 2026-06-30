@@ -295,9 +295,7 @@ export function createMicSession({
   let audioCtx = null;
   let recorder = null;
   let chunks = [];
-  let vadTimer = null;
-  let silenceTimer = null;
-  let hardTimer = null;
+  let vadNode = null; // ScriptProcessor running VAD on the audio thread
   let sawSpeech = false;
   let forceSend = false;
   let done = false;
@@ -305,9 +303,15 @@ export function createMicSession({
   let peakRms = 0;
 
   function teardown() {
-    clearInterval(vadTimer);
-    clearTimeout(silenceTimer);
-    clearTimeout(hardTimer);
+    if (vadNode) {
+      vadNode.onaudioprocess = null;
+      try {
+        vadNode.disconnect();
+      } catch {
+        /* already disconnected */
+      }
+      vadNode = null;
+    }
     stream?.getTracks().forEach((t) => t.stop());
     audioCtx?.close().catch(() => {});
   }
@@ -372,45 +376,54 @@ export function createMicSession({
     recorder.onstop = finish;
     recorder.start();
 
-    // Voice-activity detection: watch the input RMS. Once the speaker has said
-    // something and then stays quiet for `silenceMs`, end the turn automatically.
+    // Voice-activity detection runs on the AUDIO thread via a ScriptProcessor —
+    // NOT a setInterval. Browsers throttle JS timers in background/unfocused
+    // tabs, which used to kill listening the instant another app (Spotify, an
+    // overlay) took the foreground. The audio callback keeps firing regardless
+    // of focus, and we time silence/timeout off the audio clock (also unthrottled).
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    // AudioContext often starts "suspended" until a gesture/resume — without
-    // this the analyser reads pure silence and VAD never fires, so the turn
-    // would hang forever and nothing is ever transcribed.
     if (audioCtx.state === "suspended") await audioCtx.resume().catch(() => {});
-    const source = audioCtx.createMediaStreamSource(stream);
-    const analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 512;
-    source.connect(analyser);
-    const buf = new Uint8Array(analyser.fftSize);
+    // If the browser suspends the context on backgrounding, pull it back so VAD
+    // keeps running while an active mic stream is feeding it.
+    audioCtx.onstatechange = () => {
+      if (audioCtx?.state === "suspended") audioCtx.resume().catch(() => {});
+    };
 
-    // setInterval (not requestAnimationFrame) so VAD keeps polling even if the
-    // tab loses focus mid-utterance.
-    vadTimer = setInterval(() => {
+    const source = audioCtx.createMediaStreamSource(stream);
+    const processor = audioCtx.createScriptProcessor(2048, 1, 1);
+    const sink = audioCtx.createGain();
+    sink.gain.value = 0; // silent: the node only needs to pull audio, not be heard
+    source.connect(processor);
+    processor.connect(sink);
+    sink.connect(audioCtx.destination);
+    vadNode = processor;
+
+    const startedAt = audioCtx.currentTime;
+    let lastVoiceAt = startedAt;
+    const silenceSec = silenceMs / 1000;
+    const maxSec = maxMs / 1000;
+
+    processor.onaudioprocess = (e) => {
       if (done) return;
-      analyser.getByteTimeDomainData(buf);
+      const input = e.inputBuffer.getChannelData(0);
       let sum = 0;
-      for (let i = 0; i < buf.length; i++) {
-        const v = (buf[i] - 128) / 128;
-        sum += v * v;
-      }
-      const rms = Math.sqrt(sum / buf.length);
+      for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+      const rms = Math.sqrt(sum / input.length);
       peakRms = Math.max(peakRms, rms);
       onLevel?.(rms); // drive any voice-reactive visual (e.g. the AYUS reactor)
+
+      const now = audioCtx.currentTime;
       if (rms > speechThreshold) {
         if (!sawSpeech) vlog("session: speech detected (rms", rms.toFixed(3) + ")");
         sawSpeech = true;
-        clearTimeout(silenceTimer);
-        silenceTimer = null;
-      } else if (sawSpeech && !silenceTimer) {
-        silenceTimer = setTimeout(() => {
-          vlog("session: silence → ending turn");
-          endTurn(false);
-        }, silenceMs);
+        lastVoiceAt = now;
+      } else if (sawSpeech && now - lastVoiceAt >= silenceSec) {
+        vlog("session: silence → ending turn");
+        endTurn(false);
+        return;
       }
-    }, 60);
-    hardTimer = setTimeout(() => endTurn(false), maxMs); // safety cap on a single turn
+      if (now - startedAt >= maxSec) endTurn(false); // safety cap on a single turn
+    };
   }
 
   start();
@@ -441,5 +454,250 @@ export function voiceSupport() {
     stt: recorder || webSpeech,
     // Always-on "Hello AYUS" wake word needs free local recognition → Chromium only.
     wake: webSpeech,
+  };
+}
+
+export function createGeminiLiveSession({
+  onListening,
+  onLevel,
+  onUserText,
+  onText,
+  onEnd,
+  onError,
+}) {
+  let ws = null;
+  let micStream = null;
+  let micCtx = null;
+  let processorNode = null;
+  let playbackCtx = null;
+  let nextPlayTime = 0;
+  let active = true;
+
+  // Initialize playback AudioContext
+  playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
+  nextPlayTime = playbackCtx.currentTime;
+
+  // 1. Establish WebSocket Connection to Backend
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const host = window.location.host;
+  const wsUrl = `${protocol}//${host}/api/secretary/live`;
+  
+  console.log("[live-ws] Connecting to live session:", wsUrl);
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = async () => {
+    console.log("[live-ws] Connection established. Initializing mic...");
+    onListening?.();
+    
+    try {
+      // 2. Access Mic
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      
+      if (!active) {
+        teardown();
+        return;
+      }
+
+      // 3. Setup Mic Audio Processing (16kHz mono PCM)
+      micCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = micCtx.createMediaStreamSource(micStream);
+      processorNode = micCtx.createScriptProcessor(2048, 1, 1);
+      
+      const sampleRate = micCtx.sampleRate;
+      
+      processorNode.onaudioprocess = (e) => {
+        if (!active || ws.readyState !== WebSocket.OPEN) return;
+        
+        const inputData = e.inputBuffer.getChannelData(0);
+        
+        // Level/RMS detection
+        let sum = 0;
+        for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
+        const rms = Math.sqrt(sum / inputData.length);
+        onLevel?.(rms);
+
+        // Downsample to 16kHz
+        const downsampled = downsampleBuffer(inputData, sampleRate, 16000);
+        const pcm16 = floatTo16BitPCM(downsampled);
+        
+        ws.send(pcm16.buffer);
+      };
+      
+      const silenceGain = micCtx.createGain();
+      silenceGain.gain.value = 0;
+      source.connect(processorNode);
+      processorNode.connect(silenceGain);
+      silenceGain.connect(micCtx.destination);
+      
+    } catch (err) {
+      console.error("[live-ws] Mic initialization failed:", err);
+      onError?.("mic-failed");
+      ws.close();
+    }
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.serverContent) {
+        // Handle User Turn transcription
+        if (msg.serverContent.userTurn) {
+          const parts = msg.serverContent.userTurn.parts || [];
+          let userText = "";
+          for (const part of parts) {
+            if (part.text) userText += part.text;
+          }
+          if (userText) {
+            onUserText?.(userText);
+          }
+        }
+
+        // Handle Model Response
+        if (msg.serverContent.modelTurn) {
+          const parts = msg.serverContent.modelTurn.parts || [];
+          for (const part of parts) {
+            if (part.inlineData && part.inlineData.data) {
+              playPCMChunk(part.inlineData.data);
+            }
+            if (part.text) {
+              onText?.(part.text);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[live-ws] Error handling incoming WS message:", err);
+    }
+  };
+
+  ws.onerror = (err) => {
+    console.error("[live-ws] WebSocket error:", err);
+    onError?.("websocket-failed");
+  };
+
+  ws.onclose = () => {
+    console.log("[live-ws] Connection closed");
+    teardown();
+    onEnd?.();
+  };
+
+  function playPCMChunk(base64Data) {
+    if (!playbackCtx) return;
+    if (playbackCtx.state === "suspended") {
+      playbackCtx.resume().catch(() => {});
+    }
+
+    try {
+      const binaryString = atob(base64Data);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      const int16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) {
+        float32[i] = int16[i] / 32768.0;
+      }
+
+      const audioBuffer = playbackCtx.createBuffer(1, float32.length, 24000);
+      audioBuffer.getChannelData(0).set(float32);
+
+      const source = playbackCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(playbackCtx.destination);
+
+      const now = playbackCtx.currentTime;
+      if (nextPlayTime < now) {
+        nextPlayTime = now + 0.03;
+      }
+      source.start(nextPlayTime);
+      nextPlayTime += audioBuffer.duration;
+    } catch (err) {
+      console.error("[live-ws] Error playing audio chunk:", err);
+    }
+  }
+
+  function teardown() {
+    active = false;
+    if (micStream) {
+      micStream.getTracks().forEach((track) => track.stop());
+      micStream = null;
+    }
+    if (processorNode) {
+      try {
+        processorNode.disconnect();
+      } catch {}
+      processorNode = null;
+    }
+    if (micCtx) {
+      micCtx.close().catch(() => {});
+      micCtx = null;
+    }
+    if (playbackCtx) {
+      playbackCtx.close().catch(() => {});
+      playbackCtx = null;
+    }
+  }
+
+  function downsampleBuffer(buffer, sampleRate, outSampleRate = 16000) {
+    if (outSampleRate === sampleRate) return buffer;
+    const sampleRateRatio = sampleRate / outSampleRate;
+    const newLength = Math.round(buffer.length / sampleRateRatio);
+    const result = new Float32Array(newLength);
+    let offsetResult = 0;
+    let offsetBuffer = 0;
+    while (offsetResult < result.length) {
+      const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+      let accum = 0;
+      let count = 0;
+      for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+        accum += buffer[i];
+        count++;
+      }
+      result[offsetResult] = accum / count;
+      offsetResult++;
+      offsetBuffer = nextOffsetBuffer;
+    }
+    return result;
+  }
+
+  function floatTo16BitPCM(input) {
+    const output = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      output[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    return output;
+  }
+
+  return {
+    sendText(text) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const textMsg = {
+          clientContent: {
+            turns: [
+              {
+                role: "user",
+                parts: [{ text }]
+              }
+            ],
+            turnComplete: true
+          }
+        };
+        ws.send(JSON.stringify(textMsg));
+      }
+    },
+    stop() {
+      if (ws) ws.close();
+      teardown();
+    },
+    cancel() {
+      if (ws) ws.close();
+      teardown();
+    }
   };
 }

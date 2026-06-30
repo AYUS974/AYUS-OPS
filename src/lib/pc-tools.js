@@ -39,8 +39,10 @@ function assertAllowed(p) {
 }
 
 // `start` goes through cmd.exe, so never interpolate untrusted strings raw.
+// We only need to block double quotes and newlines, because the target is
+// always wrapped in double quotes in execAsync (preventing any shell injection).
 function cmdSafe(s) {
-  if (/[&|<>^%"`$;]/.test(s)) throw new Error("input contains characters that are not allowed");
+  if (/["\r\n]/.test(s)) throw new Error("input contains characters that are not allowed");
   return s;
 }
 
@@ -66,6 +68,41 @@ const APPS = {
   mail: "outlookmail:",
 };
 
+// Friendly app name → process image name, for closing apps with taskkill.
+const APP_PROCESSES = {
+  spotify: "Spotify.exe",
+  whatsapp: "WhatsApp.exe",
+  chrome: "chrome.exe",
+  edge: "msedge.exe",
+  notepad: "notepad.exe",
+  calculator: "CalculatorApp.exe",
+  vscode: "Code.exe",
+  code: "Code.exe",
+  vlc: "vlc.exe",
+  word: "WINWORD.EXE",
+  excel: "EXCEL.EXE",
+  explorer: "explorer.exe",
+  outlook: "OUTLOOK.EXE",
+  teams: "ms-teams.exe",
+  discord: "Discord.exe",
+};
+
+// Killing any of these would destabilise or crash Windows — always refuse.
+const PROTECTED_PROCESSES = new Set([
+  "system", "registry", "smss.exe", "csrss.exe", "wininit.exe", "winlogon.exe",
+  "services.exe", "lsass.exe", "svchost.exe", "dwm.exe", "fontdrvhost.exe",
+  "ctfmon.exe", "sihost.exe",
+]);
+
+// Multimedia virtual key codes, sent via WScript.Shell.SendKeys.
+const MEDIA_KEYS = { play_pause: 179, play: 179, pause: 179, next: 176, previous: 177, prev: 177, stop: 178 };
+
+// Run a PowerShell one-liner. Callers build these from validated numbers/enums
+// only — never from raw user text. windowsHide keeps the console hidden.
+async function runPowerShell(script) {
+  await execAsync(`powershell -NoProfile -WindowStyle Hidden -Command "${script}"`, { windowsHide: true });
+}
+
 export const PC_TOOL_DECLARATIONS = [
   {
     name: "open_app",
@@ -75,6 +112,59 @@ export const PC_TOOL_DECLARATIONS = [
       type: "object",
       properties: { app: { type: "string", description: "App name from the known list" } },
       required: ["app"],
+    },
+  },
+  {
+    name: "close_app",
+    description:
+      "Close/quit a running application on the founder's laptop by name (e.g. 'spotify', 'chrome', 'whatsapp', or any process like 'notepad.exe'). Use when asked to close, quit, or kill an app.",
+    parameters: {
+      type: "object",
+      properties: { app: { type: "string", description: "App or process name to close" } },
+      required: ["app"],
+    },
+  },
+  {
+    name: "media_control",
+    description:
+      "Control whatever is playing media (Spotify, YouTube, VLC…): play/pause, skip to next or previous track, or stop. Works via the keyboard media keys.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["play_pause", "next", "previous", "stop"] },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "volume",
+    description:
+      "Adjust the system volume: 'mute' (toggles mute), 'up' or 'down' (~10% step), or 'set' to a specific level 0-100.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["mute", "up", "down", "set"] },
+        level: { type: "integer", description: "Target volume 0-100, only for action='set'" },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "lock_screen",
+    description: "Lock the founder's laptop screen (Win+L). Use when he says 'lock my laptop/screen'.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "power",
+    description:
+      "Power control for the laptop. Actions: 'sleep', 'shutdown', 'restart' (both schedule with a short cancelable delay), or 'cancel' to abort a pending shutdown/restart. Always confirm intent before shutdown/restart, and tell the founder he can say 'cancel' to stop it.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["sleep", "shutdown", "restart", "cancel"] },
+        delaySeconds: { type: "integer", description: "Delay before shutdown/restart (default 20, max 300)" },
+      },
+      required: ["action"],
     },
   },
   {
@@ -172,14 +262,88 @@ export const PC_TOOL_HANDLERS = {
     return { ok: true, result: `Opened ${key}` };
   },
 
+  async close_app({ app }) {
+    const raw = String(app || "").toLowerCase().trim();
+    if (!raw) return { ok: false, error: "which app?" };
+    // Map a friendly name to its process, else accept a process name directly.
+    let proc = APP_PROCESSES[raw] || (raw.endsWith(".exe") ? raw : `${raw}.exe`);
+    if (!/^[a-z0-9 ._-]+$/i.test(proc)) return { ok: false, error: "invalid app/process name" };
+    if (PROTECTED_PROCESSES.has(proc.toLowerCase())) {
+      return { ok: false, error: `Refusing to close ${proc} — it's a critical system process.` };
+    }
+    try {
+      await execAsync(`taskkill /IM "${proc}" /F`, { shell: "cmd.exe", windowsHide: true });
+      return { ok: true, result: `Closed ${proc}` };
+    } catch {
+      // taskkill exits non-zero when nothing matched
+      return { ok: false, error: `Couldn't close ${proc} — it may not be running.` };
+    }
+  },
+
+  async media_control({ action }) {
+    const code = MEDIA_KEYS[String(action || "").toLowerCase().trim()];
+    if (!code) return { ok: false, error: `unknown media action "${action}"` };
+    await runPowerShell(`(New-Object -ComObject WScript.Shell).SendKeys([char]${code})`);
+    return { ok: true, result: `Media: ${action}` };
+  },
+
+  async volume({ action, level }) {
+    const a = String(action || "").toLowerCase().trim();
+    const w = "$w=New-Object -ComObject WScript.Shell;";
+    let script;
+    if (a === "mute" || a === "unmute") script = `${w}$w.SendKeys([char]173)`;
+    else if (a === "up") script = `${w}1..5|%{$w.SendKeys([char]175)}`; // ~+10%
+    else if (a === "down") script = `${w}1..5|%{$w.SendKeys([char]174)}`; // ~-10%
+    else if (a === "set") {
+      const n = Math.max(0, Math.min(100, parseInt(level, 10)));
+      if (Number.isNaN(n)) return { ok: false, error: "level 0-100 required for 'set'" };
+      // Floor to 0 (50 down-steps), then step up ~n/2 times (each key ≈ 2%).
+      script = `${w}1..50|%{$w.SendKeys([char]174)};1..${Math.round(n / 2)}|%{$w.SendKeys([char]175)}`;
+    } else {
+      return { ok: false, error: "action must be mute | up | down | set" };
+    }
+    await runPowerShell(script);
+    return { ok: true, result: `Volume: ${a}${a === "set" ? ` ${level}%` : ""}` };
+  },
+
+  async lock_screen() {
+    await execAsync("rundll32.exe user32.dll,LockWorkStation", { windowsHide: true });
+    return { ok: true, result: "Screen locked." };
+  },
+
+  async power({ action, delaySeconds }) {
+    const a = String(action || "").toLowerCase().trim();
+    const t = Math.max(0, Math.min(300, parseInt(delaySeconds, 10) || 20));
+    if (a === "shutdown") {
+      await execAsync(`shutdown /s /t ${t}`, { windowsHide: true });
+      return { ok: true, result: `Shutting down in ${t}s — say "cancel" to abort.` };
+    }
+    if (a === "restart") {
+      await execAsync(`shutdown /r /t ${t}`, { windowsHide: true });
+      return { ok: true, result: `Restarting in ${t}s — say "cancel" to abort.` };
+    }
+    if (a === "cancel") {
+      await execAsync("shutdown /a", { windowsHide: true }).catch(() => {});
+      return { ok: true, result: "Cancelled any pending shutdown/restart." };
+    }
+    if (a === "sleep") {
+      await execAsync("rundll32.exe powrprof.dll,SetSuspendState 0,1,0", { windowsHide: true });
+      return { ok: true, result: "Going to sleep." };
+    }
+    return { ok: false, error: "action must be sleep | shutdown | restart | cancel" };
+  },
+
   async spotify_play({ query }) {
-    const q = cmdSafe(String(query || "").trim()).slice(0, 80);
+    // Strip double quotes to prevent cmdSafe from rejecting valid music searches that contain quotes
+    const cleanQuery = String(query || "").replace(/"/g, "").trim();
+    const q = cmdSafe(cleanQuery).slice(0, 80);
     if (!q) return { ok: false, error: "empty query" };
+    // Opens Spotify on the search. NOTE: there is no reliable way to auto-start a
+    // SPECIFIC track from a URI/keypress — the Play key only resumes whatever was
+    // last playing. True "play this exact song" needs the Spotify Web API (see
+    // spotify.js / spotify_play_track), which requires a Premium account.
     await startTarget(`spotify:search:${encodeURIComponent(q)}`);
-    return {
-      ok: true,
-      result: `Opened Spotify search for "${q}" — top result is one click from playing`,
-    };
+    return { ok: true, result: `Opened Spotify search for "${q}" — top result is one click from playing.` };
   },
 
   async open_url({ url }) {

@@ -16,12 +16,12 @@ const AGENT_NAMES = {
 };
 
 const AGENT_META = {
-  sales:     { display: "Sales Rep",     subtitle: "REVENUE OPS",        icon: "A", desc: "Qualifies leads, drafts outreach, and tracks follow-up opportunities." },
+  sales:     { display: "Researcher",    subtitle: "RESEARCH OPS",       icon: "A", desc: "Performs market research, competitor analysis, and gathers deep domain insights." },
   finance:   { display: "Finance",       subtitle: "TREASURY SYSTEM",    icon: "M", desc: "Manages invoices, sends payment reminders, and tracks collections." },
-  marketing: { display: "CMO",           subtitle: "MARKET VOICE",       icon: "K", desc: "Turns strategy into content angles, campaigns, and publish-ready drafts." },
+  marketing: { display: "Content Writer", subtitle: "SCRIPTWRITING",      icon: "K", desc: "Writes video/reel scripts, drafts blog posts, and writes compelling copy." },
   secretary: { display: "AYUS",          subtitle: "EXECUTIVE ASSISTANT", icon: "◈", desc: "Your JARVIS-style operations intelligence — coordinates, drafts, and runs daily ops." },
-  hr:        { display: "HR",            subtitle: "TALENT OPS",         icon: "I", desc: "Screens candidates, manages onboarding, and handles team operations." },
-  cto:       { display: "Dev",           subtitle: "BUILD SYSTEM",       icon: "V", desc: "Builds dashboards, integrations, scripts, and verifies technical changes." },
+  hr:        { display: "Social Media & Ads", subtitle: "CAMPAIGNS",     icon: "I", desc: "Creates AI-generated advertisement posts, videos, reels, and runs marketing campaigns." },
+  cto:       { display: "Builder",       subtitle: "BUILD SYSTEM",       icon: "V", desc: "Builds dashboards, codebases, integrations, web apps, and executes developer tasks." },
 };
 
 const NAV_ITEMS = [
@@ -526,37 +526,59 @@ function AgentNetwork({ actions, busy, filter, onSelectAgent, lastRunFor, countB
 function formatMarkdown(text) {
   if (!text) return [];
   const lines = text.split("\n");
+  
   return lines.map((line, idx) => {
-    let renderedLine = line;
+    const trimmed = line.trim();
+    
+    // Bold replacement
+    let content = line.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+    // Inline code replacement
+    content = content.replace(/`(.*?)`/g, "<code>$1</code>");
 
-    // Bold replacement (**text** or __text__)
-    renderedLine = renderedLine.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+    // Horizontal rule
+    if (trimmed === "---" || trimmed === "***") {
+      return <hr key={idx} className="chat-hr" />;
+    }
+
+    // Headers
+    if (trimmed.startsWith("### ")) {
+      const headerText = content.trim().substring(4);
+      return <h3 key={idx} className="chat-h3" dangerouslySetInnerHTML={{ __html: headerText }} />;
+    }
+    if (trimmed.startsWith("## ")) {
+      const headerText = content.trim().substring(3);
+      return <h2 key={idx} className="chat-h2" dangerouslySetInnerHTML={{ __html: headerText }} />;
+    }
+    if (trimmed.startsWith("# ")) {
+      const headerText = content.trim().substring(2);
+      return <h1 key={idx} className="chat-h1" dangerouslySetInnerHTML={{ __html: headerText }} />;
+    }
 
     // Bullet list item
-    if (line.trim().startsWith("- ") || line.trim().startsWith("* ")) {
-      const content = line.trim().substring(2);
-      const boldContent = content.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+    if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+      const itemText = content.trim().substring(2);
       return (
-        <li key={idx} className="chat-bullet-li" dangerouslySetInnerHTML={{ __html: boldContent }} />
+        <li key={idx} className="chat-bullet-li" dangerouslySetInnerHTML={{ __html: itemText }} />
       );
     }
 
     // Ordered list item
-    const matchOrdered = line.trim().match(/^(\d+)\.\s+(.*)/);
+    const matchOrdered = trimmed.match(/^(\d+)\.\s+(.*)/);
     if (matchOrdered) {
-      const boldContent = matchOrdered[2].replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+      const dotIndex = content.indexOf(".");
+      const itemText = content.substring(dotIndex + 1).trim();
       return (
-        <li key={idx} className="chat-ordered-li" dangerouslySetInnerHTML={{ __html: boldContent }} />
+        <li key={idx} className="chat-ordered-li" dangerouslySetInnerHTML={{ __html: itemText }} />
       );
     }
 
-    // Paragraph
-    if (line.trim() === "") {
+    // Paragraph spacer for empty lines
+    if (trimmed === "") {
       return <div key={idx} className="chat-paragraph-spacer" />;
     }
 
     return (
-      <p key={idx} className="chat-p" dangerouslySetInnerHTML={{ __html: renderedLine }} />
+      <p key={idx} className="chat-p" dangerouslySetInnerHTML={{ __html: content }} />
     );
   });
 }
@@ -596,7 +618,7 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
     const welcome = [
       {
         role: "assistant",
-        content: "AYUS online. I've reviewed the current ops status. I can draft emails, schedule tasks, or summarise what Arjun, Meera, and Kabir are working on. How may I help, sir?",
+        content: "AYUS online. I've reviewed the current ops status. I can draft emails, schedule tasks, or summarise what Arjun (Research), Meera (Finance), and Kabir (Content) are working on. How may I help, sir?",
         timestamp: new Date().toISOString()
       }
     ];
@@ -1031,6 +1053,62 @@ function GoogleConnect({ showToast }) {
   );
 }
 
+function SpotifyConnect({ showToast }) {
+  const [st, setSt] = useState(null);
+  const refresh = useCallback(() => {
+    api("/spotify/status")
+      .then(setSt)
+      .catch(() => setSt({ configured: false, connected: false }));
+  }, []);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  async function connect() {
+    try {
+      const { url } = await api("/spotify/connect");
+      window.location.href = url;
+    } catch (e) {
+      showToast("Spotify connect failed: " + e.message, "err");
+    }
+  }
+  async function disconnect() {
+    try {
+      await api("/spotify/disconnect", { method: "POST" });
+      showToast("Spotify disconnected", "warn");
+      refresh();
+    } catch (e) {
+      showToast("Failed: " + e.message, "err");
+    }
+  }
+
+  if (!st) return null;
+
+  return (
+    <div className={`gconnect ${st.connected ? "is-connected" : ""}`}>
+      <div className="gconnect-row">
+        <span className="gconnect-logo" style={{ background: "#1DB954" }}>♫</span>
+        <div className="gconnect-info">
+          <strong>Spotify</strong>
+          <span className="gconnect-status">
+            {!st.configured
+              ? "Add SPOTIFY_CLIENT_ID/SECRET in .env"
+              : st.connected
+                ? `Connected${st.account ? " · " + st.account : ""}`
+                : "Not connected — needs Premium to play"}
+          </span>
+        </div>
+      </div>
+      {st.configured &&
+        (st.connected ? (
+          <button className="gconnect-btn ghost" onClick={disconnect}>Disconnect</button>
+        ) : (
+          <button className="gconnect-btn" onClick={connect}>Connect Spotify</button>
+        ))}
+    </div>
+  );
+}
+
 export default function Dashboard({ session }) {
   const [data, setData] = useState(null); // null = first load in progress
   const [loadError, setLoadError] = useState("");
@@ -1051,6 +1129,12 @@ export default function Dashboard({ session }) {
   const [tab, setTab] = useState("ayus"); // ayus | agents | approvals | insights
   const [toast, setToast] = useState(null); // { msg, tone }
   const toastTimer = useRef(null);
+
+  const showToast = useCallback((msg, tone = "ok") => {
+    setToast({ msg, tone });
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 3000);
+  }, []);
 
   useEffect(
     () =>
@@ -1101,25 +1185,26 @@ export default function Dashboard({ session }) {
     };
   }, [showToast]);
 
-  // Surface the result of a Google OAuth round-trip, then clean the URL.
+  // Surface the result of a Google / Spotify OAuth round-trip, then clean the URL.
   useEffect(() => {
-    const g = new URLSearchParams(window.location.search).get("google");
-    if (!g) return;
-    const map = {
+    const params = new URLSearchParams(window.location.search);
+    const g = params.get("google");
+    const s = params.get("spotify");
+    if (!g && !s) return;
+    const gmap = {
       connected: ["Google connected ✓ — Gmail & Calendar are live", "ok"],
       error: ["Google connection failed — try again", "err"],
       badstate: ["Google connection expired — try again", "err"],
     };
-    const [msg, tone] = map[g] || [];
+    const smap = {
+      connected: ["Spotify connected ✓ — AYUS can play songs now", "ok"],
+      error: ["Spotify connection failed — try again", "err"],
+      badstate: ["Spotify connection expired — try again", "err"],
+    };
+    const [msg, tone] = (g ? gmap[g] : smap[s]) || [];
     if (msg) setToast({ msg, tone });
     window.history.replaceState({}, "", window.location.pathname);
     setTimeout(() => setToast(null), 4000);
-  }, []);
-
-  const showToast = useCallback((msg, tone = "ok") => {
-    setToast({ msg, tone });
-    clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 3000);
   }, []);
 
   const load = useCallback(async () => {
@@ -1247,7 +1332,7 @@ export default function Dashboard({ session }) {
           {/* AYUS — dedicated reactor page */}
           {tab === "ayus" && (
             <div className="ayus-page">
-              <AyusReactor variant="page" />
+              <AyusReactor variant="page" onOpenChat={() => setIsChatOpen(true)} />
             </div>
           )}
 
@@ -1353,6 +1438,7 @@ export default function Dashboard({ session }) {
 
                 <aside className="col-side">
                   <GoogleConnect showToast={showToast} />
+                  <SpotifyConnect showToast={showToast} />
                   <h2 className="side-title">Recent agent runs</h2>
                   {data === null ? (
                     <div className="skeleton" style={{ height: 200 }} />

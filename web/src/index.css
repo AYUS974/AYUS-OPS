@@ -1681,6 +1681,11 @@ a {
 .chat-bullet-li { list-style-type: disc; margin-left: 16px; margin-bottom: 5px; color: var(--ink); }
 .chat-ordered-li { list-style-type: decimal; margin-left: 16px; margin-bottom: 5px; color: var(--ink); }
 .chat-paragraph-spacer { height: 6px; }
+.chat-content h1, .chat-h1 { font-size: 1.3rem; font-weight: 700; margin-top: 14px; margin-bottom: 8px; color: var(--ink-bright); }
+.chat-content h2, .chat-h2 { font-size: 1.15rem; font-weight: 650; margin-top: 12px; margin-bottom: 6px; color: var(--ink-bright); }
+.chat-content h3, .chat-h3 { font-size: 1.05rem; font-weight: 600; margin-top: 10px; margin-bottom: 4px; color: var(--ink-bright); }
+.chat-content code { background: rgba(255, 255, 255, 0.1); padding: 2px 5px; border-radius: 3px; font-family: var(--mono); font-size: 0.9em; color: #ff7ebb; }
+.chat-content hr, .chat-hr { border: none; border-top: 1px solid rgba(255, 255, 255, 0.15); margin: 12px 0; }
 
 .chat-time { font-family: var(--mono); font-size: 9px; color: var(--muted); margin-top: 5px; }
 .user-row .chat-time { align-self: flex-end; }

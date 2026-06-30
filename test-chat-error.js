@@ -1,3 +1,4 @@
+import "./src/lib/ca.js";
 import "dotenv/config";
 import { runSecretaryChatGroq } from "./src/lib/secretaryAgent.js";
 

@@ -1,13 +1,15 @@
 import { db } from "./supabase.js";
 import { geminiGenerate } from "./gemini.js";
 import { groqChat, groqChatStream } from "./groq.js";
+import { glmChat, glmChatStream } from "./glm.js";
 import { PC_TOOL_DECLARATIONS, PC_TOOL_HANDLERS, ALLOWED_DIRS } from "./pc-tools.js";
 import { memoryBlock, remember } from "./memory.js";
 import { isGoogleConnected, listRecentEmails, listUpcomingEvents } from "./google.js";
+import { isSpotifyConnected, playTrack } from "./spotify.js";
 
 // Read-only Google tools — AYUS can look at your inbox and calendar freely.
 // Anything that SENDS or CREATES goes through propose_action (your approval).
-const GOOGLE_READ_TOOLS = [
+export const GOOGLE_READ_TOOLS = [
   {
     name: "gmail_search",
     description:
@@ -31,7 +33,7 @@ const GOOGLE_READ_TOOLS = [
   },
 ];
 
-const REMEMBER_TOOL = {
+export const REMEMBER_TOOL = {
   name: "remember",
   description:
     "Save a durable fact or preference so you (and the other agents) recall it in future. " +
@@ -49,7 +51,7 @@ const REMEMBER_TOOL = {
   },
 };
 
-const PROPOSE_TOOL = {
+export const PROPOSE_TOOL = {
   name: "propose_action",
   description:
     "Draft a proposal for the founder's approval queue. Nothing is executed until he approves it. Types:\n" +
@@ -97,29 +99,58 @@ const PROPOSE_TOOL = {
   },
 };
 
-const SYSTEM = `You are AYUS, the operations intelligence of AYUS Labs — the founder's (Anish) personal command-and-control assistant, in the spirit of a calm, hyper-capable AI like JARVIS. You coordinate alongside the specialist agents: Arjun (sales), Meera (finance), Kabir (marketing), Isha (HR) and Vikram (CTO).
+export const SPOTIFY_TOOL = {
+  name: "spotify_play_track",
+  description:
+    "Play a SPECIFIC song on Spotify — searches for it and actually starts playback on the founder's device. Prefer this over spotify_play whenever the founder asks to play a particular song/artist; it plays the exact track instead of just opening a search. Requires Spotify connected + Premium.",
+  parameters: {
+    type: "object",
+    properties: { query: { type: "string", description: "Song and/or artist to play, e.g. 'Ae Dil Hai Mushkil Arijit'" } },
+    required: ["query"],
+  },
+};
+
+export const DELEGATE_RESEARCH_TOOL = {
+  name: "delegate_to_researcher",
+  description:
+    "Delegate a research task to Arjun (the Research Agent). Use this whenever the founder asks you " +
+    "to research a topic, find information, or compile a report on a specific subject. " +
+    "This tool will invoke the specialized Research Agent to perform the research and return the report.",
+  parameters: {
+    type: "object",
+    properties: {
+      topic: { type: "string", description: "The specific topic or question to research in detail" },
+    },
+    required: ["topic"],
+  },
+};
+
+export const SYSTEM = `You are AYUS, the operations intelligence of AYUS Labs — the founder's (Anish) personal command-and-control assistant, in the spirit of a calm, hyper-capable AI like JARVIS. You coordinate alongside the specialist agents: Arjun (Researcher), Meera (Finance), Kabir (Content Writer), Isha (Social Media & Ads) and Vikram (Builder).
 
 Identity: You are AYUS. If asked who you are or your name, you are AYUS — never any other name.
 
 Personality & language: composed, precise, and quietly witty — the unflappable right hand. Speak in clear, articulate English by default, addressing the founder respectfully (an occasional "sir" is fine, never fawning). Keep replies short and natural since they are usually spoken aloud. You understand Hindi/Hinglish perfectly; if the founder speaks Hinglish, you may mirror it lightly, but stay crisp. Use markdown lists only when listing multiple items.
 
 You have real tools:
-- Laptop tools: open apps (Spotify, Chrome, etc.), play music via Spotify search, open files/folders, search and read files in the founder's allowed folders, open websites, system info.
+- Laptop tools: open apps (Spotify, Chrome, etc.) and CLOSE/quit them, control media playback (play/pause, next, previous), adjust system volume (mute/up/down/set), lock the screen, and power the laptop (sleep / shutdown / restart, all with a short cancelable delay; 'cancel' aborts a pending one). Also: open files/folders, search and read files in the founder's allowed folders, open websites, system info.
+- Music: to play a SPECIFIC song, use spotify_play_track (it actually starts the exact track on Spotify — needs Spotify connected + Premium). Only fall back to spotify_play (which just opens a search) if spotify_play_track says Spotify isn't connected.
 - Google (when connected): gmail_search to read his inbox, calendar_upcoming to see his schedule — both read-only, use them freely to answer questions like "koi important mail aaya?" or "aaj kya schedule hai?".
 - propose_action: queue something for approval — including gmail_send (real email) and calendar_event (real calendar event) when Google is connected.
 - remember: save how the founder likes things done (preferences, recurring facts, client notes) so you and the team recall it next time. Use it whenever he tells you a preference or correction.
+- Research: to research any topic, always use delegate_to_researcher (do not attempt to answer complex research questions yourself; Arjun, the Research Agent, will compile the report and you will present it).
 
 CRITICAL RULES:
 - NEVER state system info, file listings, file contents, or claim you opened/played anything unless you ACTUALLY called the tool in this turn and used its real result. Inventing tool output is the worst possible failure.
 - When the founder asks you to do something a tool can do, call the tool FIRST, then answer using its result. Don't ask permission for read/open actions — just do them.
+- If the founder asks you to research a topic, look up information, or compile a report, you MUST call delegate_to_researcher. Do NOT do the research yourself and do NOT use laptop tools like search_files, open_app(chrome), or open_url to do web searches for general topics.
 - The founder's laptop runs Windows. Your accessible folders are exactly: ${ALLOWED_DIRS.join(" ; ")}. Use these real paths with list_dir/search_files/read_file/open_path.
-- You can ONLY read and open things on the laptop. If the founder asks you to delete, modify, move or install anything, explain that it needs approval and use propose_action with a manual_task describing exactly what needs doing.
+- You can open/close apps, control media & volume, lock, and put the laptop to sleep/shutdown/restart directly — just do it when asked. For shutdown/restart, briefly confirm and remind him he can say "cancel". You CANNOT write, move, delete, or install files/software — if he asks for that, explain it needs approval and use propose_action with a manual_task describing exactly what needs doing. File access stays read-only and inside the allowed folders.
 - Emails you draft must be professional English (signed 'Team AYUS Labs'), even though you chat in Hinglish.
 - If a tool fails, tell the founder honestly what happened.`;
 
 // Execute a single tool call by name. Shared by the Gemini and Groq chat loops.
 // Returns { result, suggestedAction } — suggestedAction is set only for propose_action.
-async function execTool(name, args) {
+export async function execTool(name, args) {
   let result;
   let suggestedAction = null;
   try {
@@ -140,6 +171,22 @@ async function execTool(name, args) {
         const events = await listUpcomingEvents({ maxResults: args?.maxResults || 10 });
         result = { ok: true, result: events };
       }
+    } else if (name === "spotify_play_track") {
+      if (!(await isSpotifyConnected())) {
+        result = {
+          ok: false,
+          error: "Spotify not connected — ask the founder to click Connect Spotify in the dashboard. Meanwhile you can use spotify_play to open the search.",
+        };
+      } else {
+        let r = await playTrack(args?.query || "");
+        // No active device? Open the Spotify desktop app, give it a moment, retry once.
+        if (!r.ok && r.code === "no_device") {
+          await PC_TOOL_HANDLERS.open_app({ app: "spotify" }).catch(() => {});
+          await new Promise((res) => setTimeout(res, 4000));
+          r = await playTrack(args?.query || "");
+        }
+        result = r;
+      }
     } else if (name === "remember") {
       const saved = await remember({
         agent: args?.scope === "secretary" ? "secretary" : "company",
@@ -150,6 +197,10 @@ async function execTool(name, args) {
       result = saved
         ? { ok: true, result: "Noted, sir — I'll keep that in mind going forward." }
         : { ok: false, error: "could not save memory" };
+    } else if (name === "delegate_to_researcher") {
+      const { performResearch } = await import("../agents/researcher.js");
+      const report = await performResearch(args?.topic);
+      result = { ok: true, result: report };
     } else if (PC_TOOL_HANDLERS[name]) {
       result = await PC_TOOL_HANDLERS[name](args || {});
     } else {
@@ -161,7 +212,7 @@ async function execTool(name, args) {
   return { result, suggestedAction };
 }
 
-function toolEventLine(name, args, result) {
+export function toolEventLine(name, args, result) {
   return `${name}${args && Object.keys(args).length ? `(${Object.values(args).map(String).join(", ").slice(0, 60)})` : ""} → ${result.ok ? "✓" : "✗ " + (result.error || "")}`;
 }
 
@@ -178,7 +229,7 @@ async function callGemini(contents, tools) {
   return data.candidates?.[0]?.content?.parts || [];
 }
 
-async function companySnapshot() {
+export async function companySnapshot() {
   const [leads, invoices, pending, sysinfo, learned, gConnected] = await Promise.all([
     db.from("leads").select("id,name,email,status,score").order("created_at", { ascending: false }).limit(10),
     db.from("invoices").select("id,client_name,client_email,amount,currency,due_date,status").eq("status", "unpaid").limit(10),
@@ -219,7 +270,7 @@ export async function runSecretaryChat(messages) {
     ],
   }));
 
-  const tools = [...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, PROPOSE_TOOL, REMEMBER_TOOL];
+  const tools = [...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, SPOTIFY_TOOL, PROPOSE_TOOL, REMEMBER_TOOL, DELEGATE_RESEARCH_TOOL];
   const contents = [...history];
   const toolEvents = [];
   let suggestedAction = null;
@@ -255,7 +306,7 @@ export async function runSecretaryChat(messages) {
 }
 
 // Gemini-style tool declarations → OpenAI/Groq tool format.
-function toGroqTools(decls) {
+export function toGroqTools(decls) {
   return decls.map((d) => ({
     type: "function",
     function: { name: d.name, description: d.description, parameters: d.parameters },
@@ -278,7 +329,7 @@ export async function runSecretaryChatGroq(messages) {
     })),
   ];
 
-  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, PROPOSE_TOOL, REMEMBER_TOOL]);
+  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, SPOTIFY_TOOL, PROPOSE_TOOL, REMEMBER_TOOL, DELEGATE_RESEARCH_TOOL]);
   const toolEvents = [];
   let suggestedAction = null;
 
@@ -339,12 +390,134 @@ export async function runSecretaryChatStream(messages, { onDelta, onToolEvent } 
     })),
   ];
 
-  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, PROPOSE_TOOL, REMEMBER_TOOL]);
+  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, SPOTIFY_TOOL, PROPOSE_TOOL, REMEMBER_TOOL, DELEGATE_RESEARCH_TOOL]);
   const toolEvents = [];
   let suggestedAction = null;
 
   for (let round = 0; round < 6; round++) {
     const msg = await groqChatStream(chatMessages, tools, { onDelta });
+    const calls = msg.tool_calls || [];
+
+    if (calls.length === 0) {
+      return {
+        message: (msg.content || "").trim() || "Apologies, sir — I didn't quite catch that. Could you rephrase?",
+        toolEvents,
+        suggestedAction,
+      };
+    }
+
+    chatMessages.push({ role: "assistant", content: msg.content || "", tool_calls: calls });
+
+    for (const call of calls) {
+      const name = call.function?.name;
+      let args = {};
+      try {
+        args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
+      } catch {
+        /* malformed args — pass through as empty */
+      }
+      const { result, suggestedAction: sa } = await execTool(name, args);
+      if (sa) suggestedAction = sa;
+      const line = toolEventLine(name, args, result);
+      toolEvents.push(line);
+      onToolEvent?.(line);
+      chatMessages.push({
+        role: "tool",
+        tool_call_id: call.id,
+        name,
+        content: JSON.stringify(result).slice(0, 4000),
+      });
+    }
+  }
+
+  return {
+    message: "That took rather more steps than expected, sir — could you simplify the request and try again?",
+    toolEvents,
+    suggestedAction,
+  };
+}
+
+/**
+ * Same as runSecretaryChatGroq but backed by GLM.
+ */
+export async function runSecretaryChatGlm(messages) {
+  const snapshot = await companySnapshot();
+  const history = messages.slice(-10);
+  const chatMessages = [
+    { role: "system", content: SYSTEM },
+    ...history.map((m, i, arr) => ({
+      role: m.role === "user" ? "user" : "assistant",
+      content:
+        i === arr.length - 1 && m.role === "user" ? `${snapshot}\n\nFounder says: ${m.content}` : m.content,
+    })),
+  ];
+
+  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, SPOTIFY_TOOL, PROPOSE_TOOL, REMEMBER_TOOL, DELEGATE_RESEARCH_TOOL]);
+  const toolEvents = [];
+  let suggestedAction = null;
+
+  for (let round = 0; round < 6; round++) {
+    const msg = await glmChat(chatMessages, tools);
+    const calls = msg.tool_calls || [];
+
+    if (calls.length === 0) {
+      return {
+        message: (msg.content || "").trim() || "Apologies, sir — I didn't quite catch that. Could you rephrase?",
+        toolEvents,
+        suggestedAction,
+      };
+    }
+
+    chatMessages.push({ role: "assistant", content: msg.content || "", tool_calls: calls });
+
+    for (const call of calls) {
+      const name = call.function?.name;
+      let args = {};
+      try {
+        args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
+      } catch {
+        /* malformed args — pass through as empty */
+      }
+      const { result, suggestedAction: sa } = await execTool(name, args);
+      if (sa) suggestedAction = sa;
+      toolEvents.push(toolEventLine(name, args, result));
+      chatMessages.push({
+        role: "tool",
+        tool_call_id: call.id,
+        name,
+        content: JSON.stringify(result).slice(0, 4000),
+      });
+    }
+  }
+
+  return {
+    message: "That took rather more steps than expected, sir — could you simplify the request and try again?",
+    toolEvents,
+    suggestedAction,
+  };
+}
+
+/**
+ * Streaming version of the GLM chat loop.
+ */
+export async function runSecretaryChatGlmStream(messages, { onDelta, onToolEvent } = {}) {
+  const snapshot = await companySnapshot();
+  const history = messages.slice(-10);
+  const chatMessages = [
+    { role: "system", content: SYSTEM },
+    ...history.map((m, i, arr) => ({
+      role: m.role === "user" ? "user" : "assistant",
+      content:
+        i === arr.length - 1 && m.role === "user" ? `${snapshot}\n\nFounder says: ${m.content}` : m.content,
+    })),
+  ];
+
+  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, SPOTIFY_TOOL, PROPOSE_TOOL, REMEMBER_TOOL, DELEGATE_RESEARCH_TOOL]);
+  const toolEvents = [];
+  let suggestedAction = null;
+
+  for (let round = 0; round < 6; round++) {
+    const msg = await glmChatStream(chatMessages, tools, { onDelta });
     const calls = msg.tool_calls || [];
 
     if (calls.length === 0) {
