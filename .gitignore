@@ -5,6 +5,10 @@ web/dist/
 .env.local
 *.log
 .DS_Store
+# WhatsApp pairing keys — anyone with these can send as you.
+auth_info_baileys/
+# Contact book — real phone numbers, stays on the machine.
+data/
 ayus-voice-test.mp3
 last-setup.json
 nul.css

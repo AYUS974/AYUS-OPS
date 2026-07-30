@@ -1,0 +1,115 @@
+/* ================================================================
+   CONTACTS — name → number book that powers "message Rahul"
+   ================================================================ */
+.ct { padding: 0 0 40px; animation: ct-fade 0.4s ease; }
+@keyframes ct-fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.ct-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 16px; margin-bottom: 18px; flex-wrap: wrap;
+}
+.ct-title {
+  font-size: 22px; font-weight: 700; letter-spacing: 0.3px; margin: 0;
+  background: linear-gradient(135deg, #fff 30%, var(--gold) 100%);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+.ct-sub { color: var(--muted-bright); font-size: 13px; margin-top: 4px; }
+
+.ct-search {
+  flex: 0 1 260px; height: 38px; padding: 0 12px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  color: var(--ink); font-family: var(--sans); font-size: 13px; outline: none;
+}
+.ct-search:focus { border-color: var(--line-strong); }
+
+.ct-error {
+  background: rgba(196, 75, 44, 0.1); border: 1px solid rgba(196, 75, 44, 0.35);
+  color: #f5b8a6; padding: 10px 14px; border-radius: 10px; font-size: 13px; margin-bottom: 14px;
+}
+
+.ct-cols { display: grid; grid-template-columns: 340px 1fr; gap: 18px; align-items: start; }
+@media (max-width: 900px) { .ct-cols { grid-template-columns: 1fr; } }
+
+.ct-panel {
+  display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+  padding: 16px; min-height: 180px;
+}
+.ct-panel-title {
+  font-size: 13px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
+  color: var(--muted-bright); margin-bottom: 12px;
+}
+
+.ct-label { font-size: 12px; color: var(--muted-bright); margin: 10px 0 5px; }
+.ct-opt { color: var(--muted); }
+.ct-input {
+  height: 38px; padding: 0 12px; width: 100%;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  color: var(--ink); font-family: var(--sans); font-size: 13.5px; outline: none;
+}
+.ct-input:focus { border-color: var(--line-strong); }
+.ct-area { height: 110px; padding: 10px 12px; resize: vertical; line-height: 1.45; }
+.ct-hint { font-size: 11.5px; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+
+.ct-actions { display: flex; gap: 8px; margin-top: 14px; }
+.ct-btn {
+  padding: 0 18px; height: 38px; border: none; border-radius: 10px; cursor: pointer;
+  background: linear-gradient(135deg, var(--gold), #c98a24); color: #1a1206;
+  font-weight: 700; font-size: 13.5px; transition: filter 0.2s, opacity 0.2s;
+}
+.ct-btn:hover:not(:disabled) { filter: brightness(1.1); }
+.ct-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ct-btn-ghost { background: transparent; border: 1px solid var(--line); color: var(--ink); font-weight: 600; }
+
+.ct-tip {
+  margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line-soft);
+  font-size: 11.5px; color: var(--muted-bright); line-height: 1.5;
+}
+.ct-tip em { color: var(--gold); font-style: normal; }
+
+.ct-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; max-height: calc(100dvh - 260px); }
+.ct-row {
+  display: flex; gap: 11px; align-items: center;
+  padding: 9px 10px; border-radius: 12px; border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.015); transition: border-color 0.15s;
+}
+.ct-row:hover { border-color: var(--line-strong); }
+.ct-avatar {
+  flex-shrink: 0; width: 36px; height: 36px; border-radius: 11px;
+  display: grid; place-items: center; font-size: 12px; font-weight: 700;
+  background: linear-gradient(135deg, rgba(232, 168, 56, 0.22), rgba(196, 75, 44, 0.18));
+  color: #f3d9a6; border: 1px solid var(--line-soft);
+}
+.ct-body { flex: 1; min-width: 0; }
+.ct-name { font-weight: 600; font-size: 13.5px; color: var(--ink-bright); }
+.ct-phone { font-size: 12px; color: var(--muted-bright); }
+.ct-note {
+  font-size: 11.5px; color: var(--muted); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.ct-row-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.ct-icon {
+  width: 30px; height: 30px; border-radius: 9px; cursor: pointer;
+  background: transparent; border: 1px solid var(--line-soft); color: var(--muted-bright);
+  font-size: 13px; transition: var(--transition);
+}
+.ct-icon:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink-bright); }
+.ct-icon:disabled { opacity: 0.3; cursor: not-allowed; }
+.ct-icon-danger:hover { border-color: rgba(196, 75, 44, 0.5); color: #f5b8a6; }
+
+.ct-empty { color: var(--muted-bright); font-size: 13px; padding: 20px 4px; }
+.ct-skel { height: 120px; border-radius: 12px; background: linear-gradient(90deg, rgba(255,255,255,0.03), rgba(255,255,255,0.06), rgba(255,255,255,0.03)); animation: ct-shine 1.4s infinite; }
+@keyframes ct-shine { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
+
+/* ---------------- Send modal ---------------- */
+.ct-modal-back {
+  position: fixed; inset: 0; z-index: 60; display: grid; place-items: center;
+  background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px); padding: 20px;
+}
+.ct-modal {
+  width: min(440px, 100%);
+  background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 16px; padding: 18px;
+}
+.ct-modal-title { font-size: 15px; font-weight: 700; color: var(--ink-bright); margin-bottom: 2px; }
+.ct-modal .ct-area { margin-top: 12px; }

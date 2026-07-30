@@ -42,6 +42,8 @@ import { getWorkflowByEventToken } from "./lib/workflows/store.js";
 import { groqTranscribe } from "./lib/groq.js";
 import { edgeTTS } from "./lib/edge-tts.js";
 import { getVaultGraph, getVaultNote, getDocsCatalog, getDocBody, searchDocs } from "./lib/vault.js";
+import { initWhatsAppBot, getWhatsAppStatus, sendWhatsAppMessage, closeWhatsAppBot } from "./lib/whatsapp.js";
+import { listContacts, saveContact, deleteContact, findContact } from "./lib/contacts.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -756,6 +758,52 @@ api.post("/run", async (_req, res) => {
   }
 });
 
+// WhatsApp bot: connection state (for a "connected / scan the QR" badge) and a
+// manual send. Both sit behind requireAuth like every other /api route.
+api.get("/whatsapp/status", (_req, res) => res.json(getWhatsAppStatus()));
+
+api.post("/whatsapp/send", async (req, res) => {
+  const { to, name, message } = req.body || {};
+  if (!message) return res.status(400).json({ error: "message is required" });
+  try {
+    // `name` looks the number up in the contact book; `to` is the raw number.
+    let number = to;
+    if (!number) {
+      const found = await findContact(name);
+      if (!found.ok) return res.status(400).json({ error: found.error });
+      number = found.contact.phone;
+    }
+    res.json(await sendWhatsAppMessage(number, message));
+  } catch (err) {
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// ---------- Contacts (name → phone, used by whatsapp_send) ----------
+api.get("/contacts", async (_req, res) => {
+  try {
+    res.json({ contacts: await listContacts() });
+  } catch (err) {
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+api.post("/contacts", async (req, res) => {
+  try {
+    res.json({ contact: await saveContact(req.body || {}) });
+  } catch (err) {
+    res.status(400).json({ error: String(err.message || err) });
+  }
+});
+
+api.delete("/contacts/:id", async (req, res) => {
+  try {
+    res.json(await deleteContact(req.params.id));
+  } catch (err) {
+    res.status(404).json({ error: String(err.message || err) });
+  }
+});
+
 app.use("/api", api);
 
 // ---------- Frontend (built React app) ----------
@@ -1039,6 +1087,8 @@ const server = app.listen(port, () => {
   recoverMissions().catch((err) => console.error("[missions] recovery failed:", err?.message || err));
   // Register cron jobs for any enabled schedule-triggered workflows.
   reloadSchedules().catch((err) => console.error("[workflows] schedule init failed:", err?.message || err));
+  // WhatsApp bot (no-op unless WHATSAPP_BOT_ENABLED=true). First run prints a QR.
+  initWhatsAppBot().catch((err) => console.error("[whatsapp] init failed:", err?.message || err));
 });
 
 // Upgrade HTTP requests on /api/secretary/live to WebSocket Server
@@ -1086,6 +1136,9 @@ function shutdown(sig) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[server] ${sig} received, shutting down`);
+  // Without this the Baileys socket keeps the process alive past server.close()
+  // and its reconnect timer fires into a half-dead process on every --watch restart.
+  closeWhatsAppBot().catch(() => {});
   server.closeAllConnections?.();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 2000).unref();

@@ -166,6 +166,34 @@ export const SCREEN_READ_TOOL = {
   },
 };
 
+export const WHATSAPP_SEND_TOOL = {
+  name: "whatsapp_send",
+  description:
+    "Send a WhatsApp message from the founder's own WhatsApp. Use whenever he says things like " +
+    "'Rahul ko message bhej do', 'WhatsApp mummy that I'll be late', 'text Priya the address'. " +
+    "Pass `name` and it is looked up in his contact book (Contacts tab) — only pass `phone` when he " +
+    "dictates a raw number. If the lookup comes back ambiguous or empty, ASK him which contact instead " +
+    "of guessing: a wrong match texts the wrong person. Write `message` in the founder's own voice, in " +
+    "the language he used. Requires the WhatsApp bot to be connected.",
+  parameters: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Contact name as the founder said it, e.g. 'Rahul'" },
+      phone: { type: "string", description: "Raw phone number with country code — only when there is no contact" },
+      message: { type: "string", description: "The exact text to send" },
+    },
+    required: ["message"],
+  },
+};
+
+export const CONTACTS_LIST_TOOL = {
+  name: "contacts_list",
+  description:
+    "List the founder's saved contacts (names + numbers). Use to answer 'who do I have saved', " +
+    "'what's Rahul's number', or to check a name before sending a WhatsApp message.",
+  parameters: { type: "object", properties: {} },
+};
+
 // Full mouse/keyboard control of the laptop UI. OFF by default — it lets AYUS
 // do anything a human can (incl. bypassing the read-only file guard by typing),
 // so it's opt-in per machine.
@@ -184,6 +212,8 @@ export const CHAT_TOOL_DECLS = [
   REMEMBER_TOOL,
   DELEGATE_RESEARCH_TOOL,
   INBOX_TO_LEADS_TOOL,
+  WHATSAPP_SEND_TOOL,
+  CONTACTS_LIST_TOOL,
 ];
 
 export const SYSTEM = `You are AYUS, the operations intelligence of AYUS Labs — the founder's (Anish) personal command-and-control assistant, in the spirit of a calm, hyper-capable AI like JARVIS. You coordinate alongside the specialist agents: Arjun (Researcher), Meera (Finance), Kabir (Content Writer), Isha (Social Media & Ads) and Vikram (Builder).
@@ -198,6 +228,7 @@ You have real tools:
 - Screen control (you can operate the mouse & keyboard like a human): ui_list (see the named buttons/fields/links in the foreground window — ALWAYS call this first to get exact names), ui_click (click an element by name), ui_type (type text, optionally into a named field), ui_key (press keys/shortcuts like '{ENTER}', '^s'). To do a task on screen: screen_read or ui_list to see it, then click/type/key step by step, re-checking with ui_list or screen_read after actions. Be careful and deliberate — you are really controlling his machine. Never type into terminals/command prompts or take destructive actions (deleting, sending money, uninstalling) without the founder's explicit go-ahead.` : ""}
 - Music: to play a SPECIFIC song, use spotify_play_track (it actually starts the exact track on Spotify — needs Spotify connected + Premium). Only fall back to spotify_play (which just opens a search) if spotify_play_track says Spotify isn't connected.
 - Google (when connected): gmail_search to read his inbox, calendar_upcoming to see his schedule — both read-only, use them freely to answer questions like "koi important mail aaya?" or "aaj kya schedule hai?".
+- WhatsApp: whatsapp_send messages anyone in his contact book by name ("Rahul ko bol do main 10 min mein aata hoon"), contacts_list shows who is saved. The message goes out from HIS number for real, so if the name doesn't resolve to exactly one contact, ask him which one rather than picking.
 - Lead capture: inbox_to_leads — pull the senders of his inbox emails into the ops Lead Pipeline as new contacts. Use it when he says things like "inbox waalon ko leads bana do" or wants email enquiries logged as leads. It skips duplicates and automated senders; afterwards tell him plainly how many you added and how many you skipped.
 - propose_action: queue something for approval — including gmail_send (real email) and calendar_event (real calendar event) when Google is connected.
 - Second brain: vault_search and vault_read give you the founder's own knowledge vault — his bio and background, BERAM, AYUS Labs, RCOEM, and a note per repo on his disk (stack, git remote, last commit, dependencies, run commands, README, project docs). This is your source of truth about HIS work. Any question about what he has built, what a project of his does, what it is written in, what is stale or unbacked-up — search the vault first and answer from it. Never guess about his projects.
@@ -296,6 +327,33 @@ export async function execTool(name, args) {
         result = { ok: false, error: "Google not connected — founder must Connect Google first." };
       } else {
         result = await inboxToLeads({ q: args?.q || "", maxResults: args?.maxResults || 12 });
+      }
+    } else if (name === "contacts_list") {
+      const { listContacts } = await import("./contacts.js");
+      const contacts = await listContacts();
+      result = { ok: true, result: contacts.map((c) => `${c.name} — ${c.phone}${c.note ? ` (${c.note})` : ""}`) };
+    } else if (name === "whatsapp_send") {
+      // Dynamic import: whatsapp.js imports THIS module to run the brain, so a
+      // static import here would be a cycle.
+      const { findContact, normalizePhone } = await import("./contacts.js");
+      const { sendWhatsAppMessage } = await import("./whatsapp.js");
+      const text = String(args?.message || "").trim();
+      let to = args?.phone ? normalizePhone(args.phone) : "";
+      let who = to;
+      let found = null;
+      if (!text) {
+        result = { ok: false, error: "message is empty" };
+      } else if (!to && !(found = await findContact(args?.name)).ok) {
+        // Not found / ambiguous — hand the reason back so AYUS asks which
+        // contact instead of texting a stranger.
+        result = found;
+      } else {
+        if (found?.contact) {
+          to = found.contact.phone;
+          who = found.contact.name;
+        }
+        await sendWhatsAppMessage(to, text);
+        result = { ok: true, result: `WhatsApp sent to ${who}: "${text}"` };
       }
     } else if (name === "screen_read") {
       const b64 = await captureScreenBase64();
