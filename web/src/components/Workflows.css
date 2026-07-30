@@ -1,0 +1,202 @@
+/* Workflow Automation — matches the AYUS OPS dark neon shell. */
+
+.wf { padding: 0 0 40px; }
+
+.wf-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.wf-title { font-size: 22px; font-weight: 700; letter-spacing: 0.3px; margin: 0; }
+.wf-sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.wf-muted { color: var(--muted); font-weight: 400; }
+
+.wf-error {
+  background: color-mix(in srgb, var(--reject) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--reject) 40%, transparent);
+  color: #fecaca;
+  padding: 10px 12px; border-radius: 10px; font-size: 13px; margin-bottom: 14px;
+}
+
+/* ---------------- buttons ---------------- */
+.wf-btn {
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.03);
+  color: var(--ink);
+  padding: 7px 14px; border-radius: 9px;
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: all 0.15s ease;
+}
+.wf-btn:hover { border-color: color-mix(in srgb, var(--sales) 55%, transparent); background: rgba(56,189,248,0.08); }
+.wf-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.wf-btn.primary { background: var(--sales); border-color: var(--sales); color: #04121f; }
+.wf-btn.primary:hover { box-shadow: 0 0 16px color-mix(in srgb, var(--sales) 45%, transparent); }
+.wf-btn.ghost { background: transparent; }
+.wf-btn.danger { color: #fca5a5; }
+.wf-btn.danger:hover { border-color: color-mix(in srgb, var(--reject) 55%, transparent); background: rgba(239,68,68,0.08); }
+
+/* ---------------- cards grid ---------------- */
+.wf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+}
+.wf-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 16px;
+  display: flex; flex-direction: column; gap: 8px;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.wf-card:hover { border-color: color-mix(in srgb, var(--sales) 35%, transparent); transform: translateY(-2px); }
+.wf-card.is-off { opacity: 0.6; }
+.wf-card-top { display: flex; align-items: center; gap: 8px; }
+.wf-card-name { font-size: 16px; font-weight: 700; margin: 2px 0 0; cursor: pointer; }
+.wf-card-name:hover { color: var(--sales); }
+.wf-card-desc { color: var(--muted); font-size: 12.5px; margin: 0; line-height: 1.45; }
+.wf-card-meta { display: flex; gap: 6px; flex-wrap: wrap; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+.wf-card-actions { display: flex; gap: 8px; margin-top: 8px; }
+.wf-card-actions .wf-btn { padding: 6px 12px; font-size: 12.5px; }
+
+.wf-trigger-badge {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 3px 8px; border-radius: 6px; font-weight: 700;
+  background: rgba(56,189,248,0.12); color: var(--sales);
+}
+
+/* ---------------- status pills ---------------- */
+.wf-pill {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+  padding: 3px 8px; border-radius: 6px;
+}
+.wf-ok   { background: color-mix(in srgb, var(--approve) 16%, transparent); color: #6ee7b7; }
+.wf-err  { background: color-mix(in srgb, var(--reject) 16%, transparent); color: #fca5a5; }
+.wf-run  { background: rgba(250,204,21,0.16); color: #fde68a; }
+.wf-idle { background: rgba(255,255,255,0.06); color: var(--muted); }
+
+/* toggle switch on the card */
+.wf-switch { margin-left: auto; position: relative; display: inline-block; width: 34px; height: 18px; cursor: pointer; }
+.wf-switch input { opacity: 0; width: 0; height: 0; }
+.wf-switch-slider {
+  position: absolute; inset: 0; border-radius: 999px;
+  background: rgba(255,255,255,0.12); transition: 0.2s;
+}
+.wf-switch-slider::before {
+  content: ""; position: absolute; height: 12px; width: 12px; left: 3px; top: 3px;
+  background: #fff; border-radius: 50%; transition: 0.2s;
+}
+.wf-switch input:checked + .wf-switch-slider { background: var(--approve); }
+.wf-switch input:checked + .wf-switch-slider::before { transform: translateX(16px); }
+
+/* ---------------- empty / skeleton ---------------- */
+.wf-empty, .wf-empty-mini {
+  color: var(--muted); text-align: center; padding: 40px 20px;
+  border: 1px dashed var(--line); border-radius: 14px; font-size: 14px;
+}
+.wf-empty-mini { padding: 16px; font-size: 12.5px; }
+.wf-hint { font-size: 12.5px; margin-top: 8px; opacity: 0.8; max-width: 520px; margin-left: auto; margin-right: auto; line-height: 1.5; }
+.wf-skel { background: linear-gradient(90deg, rgba(255,255,255,0.03), rgba(255,255,255,0.07), rgba(255,255,255,0.03)); border-radius: 12px; height: 60px; animation: wf-shimmer 1.4s infinite; }
+@keyframes wf-shimmer { 0% { background-position: -200px 0; } 100% { background-position: 200px 0; } }
+
+/* ---------------- editor ---------------- */
+.wf-editor-wrap { position: fixed; inset: 0; z-index: 1000; display: flex; justify-content: flex-end; }
+.wf-editor-backdrop { position: absolute; inset: 0; background: rgba(3,6,15,0.6); backdrop-filter: blur(3px); }
+.wf-editor {
+  position: relative;
+  width: min(680px, 100%);
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: #0a0f1e;
+  border-left: 1px solid var(--line);
+  padding: 20px 22px 60px;
+  box-shadow: -20px 0 60px rgba(0,0,0,0.5);
+  animation: wf-slide 0.2s ease;
+}
+@keyframes wf-slide { from { transform: translateX(30px); opacity: 0.6; } to { transform: translateX(0); opacity: 1; } }
+
+.wf-editor-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
+.wf-editor-head-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.wf-name-input {
+  flex: 1; min-width: 0;
+  background: transparent; border: none; border-bottom: 1px solid var(--line);
+  color: var(--ink); font-size: 19px; font-weight: 700; padding: 6px 2px;
+}
+.wf-name-input:focus { outline: none; border-color: var(--sales); }
+.wf-desc-input {
+  width: 100%; background: transparent; border: none; border-bottom: 1px solid var(--line);
+  color: var(--muted); font-size: 13px; padding: 6px 2px; margin-bottom: 18px;
+}
+.wf-desc-input:focus { outline: none; border-color: var(--sales); color: var(--ink); }
+
+.wf-section { margin-bottom: 22px; }
+.wf-section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin-bottom: 10px; font-weight: 700; }
+
+.wf-trigger-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.wf-trigger-tab {
+  border: 1px solid var(--line); background: transparent; color: var(--muted);
+  padding: 6px 14px; border-radius: 8px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.wf-trigger-tab.on { background: rgba(56,189,248,0.14); color: var(--sales); border-color: color-mix(in srgb, var(--sales) 45%, transparent); }
+
+.wf-webhook { font-size: 12.5px; }
+.wf-webhook-url { display: block; margin-top: 6px; padding: 8px 10px; background: rgba(0,0,0,0.35); border: 1px solid var(--line); border-radius: 8px; color: var(--hr); font-size: 12px; word-break: break-all; }
+
+/* form fields */
+.wf-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; font-size: 12.5px; color: var(--muted); }
+.wf-field span { font-weight: 600; }
+.wf-field input, .wf-field select, .wf-field textarea, .wf-step-name {
+  background: rgba(0,0,0,0.3); border: 1px solid var(--line); color: var(--ink);
+  border-radius: 8px; padding: 8px 10px; font-size: 13px; font-family: inherit;
+}
+.wf-field textarea { resize: vertical; line-height: 1.45; }
+.wf-field input:focus, .wf-field select:focus, .wf-field textarea:focus { outline: none; border-color: var(--sales); }
+.wf-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink); cursor: pointer; }
+.wf-check input { accent-color: var(--sales); }
+
+/* steps */
+.wf-steps { display: flex; flex-direction: column; gap: 10px; }
+.wf-step { border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,0.02); overflow: hidden; }
+.wf-step-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: rgba(255,255,255,0.025); }
+.wf-step-icon { font-size: 15px; }
+.wf-step-num { width: 20px; height: 20px; display: grid; place-items: center; background: rgba(56,189,248,0.14); color: var(--sales); border-radius: 6px; font-size: 11px; font-weight: 700; }
+.wf-step-name { flex: 1; min-width: 0; background: transparent; border: none; font-weight: 600; font-size: 13.5px; padding: 4px; }
+.wf-step-name:focus { outline: none; border-bottom: 1px solid var(--sales); }
+.wf-step-type { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+.wf-step-controls { display: flex; gap: 3px; }
+.wf-icon-btn { width: 24px; height: 24px; border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 6px; cursor: pointer; font-size: 12px; }
+.wf-icon-btn:hover:not(:disabled) { color: var(--ink); border-color: var(--sales); }
+.wf-icon-btn.danger:hover { color: #fca5a5; border-color: var(--reject); }
+.wf-icon-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.wf-step-config { padding: 10px 12px; }
+.wf-step-hint { font-size: 11.5px; color: var(--muted); margin-bottom: 8px; font-style: italic; }
+
+.wf-add-step { margin-top: 10px; width: 100%; border: 1px dashed var(--line); background: transparent; color: var(--muted); padding: 10px; border-radius: 10px; cursor: pointer; font-size: 13px; font-weight: 600; }
+.wf-add-step:hover { border-color: var(--sales); color: var(--sales); }
+
+.wf-palette { margin-top: 10px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.wf-palette-item { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: rgba(255,255,255,0.02); color: var(--ink); padding: 10px; border-radius: 10px; cursor: pointer; font-size: 12.5px; font-weight: 600; text-align: left; }
+.wf-palette-item:hover { border-color: var(--sales); background: rgba(56,189,248,0.08); }
+
+/* runs */
+.wf-runs { display: flex; flex-direction: column; gap: 8px; }
+.wf-run { border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: rgba(0,0,0,0.2); }
+.wf-run-head { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.wf-run-trigger { color: var(--muted); text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.4px; }
+.wf-run-when { margin-left: auto; color: var(--muted); font-size: 11.5px; }
+.wf-run-error { color: #fca5a5; font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
+.wf-run-steps { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.wf-log-line { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.wf-log-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--approve); flex: none; }
+.wf-log-line.is-err .wf-log-dot { background: var(--reject); }
+.wf-log-step { font-weight: 600; flex: 0 1 auto; max-width: 45%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wf-log-msg { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.wf-log-ms { color: var(--muted); font-size: 11px; flex: none; }
+
+@media (max-width: 640px) {
+  .wf-palette { grid-template-columns: 1fr; }
+}

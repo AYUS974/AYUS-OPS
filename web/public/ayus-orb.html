@@ -120,7 +120,7 @@
    - Speaks replies via speechSynthesis (deep British voice if available)
 
    >>> TO CONNECT THE REAL BRAIN: replace the body of askAyus() with a
-       fetch() to your secretary endpoint (Claude + secretaryAgent.js).
+       fetch() to your secretary endpoint (LLM + secretaryAgent.js).
    ============================================================= */
 
 const STATE_COLORS = {
@@ -386,7 +386,7 @@ function speak(text){
 }
 
 /* =============================================================
-   THE BRAIN  — replace with a fetch() to Claude / secretaryAgent.js
+   THE BRAIN  — replace with a fetch() to the LLM / secretaryAgent.js
    ============================================================= */
 async function askAyus(text){
   // -------------------------------------------------------------

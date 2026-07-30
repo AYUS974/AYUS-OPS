@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-const MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
 
 // Lazy so the app can boot in Gemini-only mode without an Anthropic key.
 // The SDK retries transient failures (429, 5xx, network) with backoff automatically.
@@ -14,7 +14,7 @@ function getClient() {
 }
 
 /**
- * Call Claude and get back structured JSON, guaranteed valid.
+ * Call the model and get back structured JSON, guaranteed valid.
  *
  * Instead of asking the model to "respond with JSON" and parsing text (which
  * breaks whenever it adds prose or fences), we hand it a single tool whose
@@ -30,7 +30,7 @@ function getClient() {
  * @param {number} [opts.maxTokens]
  * @returns {Promise<object>}
  */
-export async function claudeJSON({ system, prompt, schema, maxTokens = 1500 }) {
+export async function anthropicJSON({ system, prompt, schema, maxTokens = 1500 }) {
   const res = await getClient().messages.create({
     model: MODEL,
     max_tokens: maxTokens,
@@ -48,7 +48,7 @@ export async function claudeJSON({ system, prompt, schema, maxTokens = 1500 }) {
 
   const toolUse = res.content.find((block) => block.type === "tool_use");
   if (!toolUse) {
-    throw new Error(`Claude returned no structured output (stop_reason: ${res.stop_reason})`);
+    throw new Error(`Model returned no structured output (stop_reason: ${res.stop_reason})`);
   }
   return toolUse.input;
 }

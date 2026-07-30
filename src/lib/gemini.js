@@ -54,10 +54,11 @@ function retryDelayMs(errText) {
  * one process-wide queue, free-tier pacing, and 429-aware retries.
  * Returns the raw response JSON.
  */
-export async function geminiGenerate(body, { attempts = 5 } = {}) {
+export async function geminiGenerate(body, { attempts = 5, deadlineMs = Infinity } = {}) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not set (get one at aistudio.google.com)");
 
+  const started = Date.now();
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const res = await enqueue(() =>
@@ -74,6 +75,12 @@ export async function geminiGenerate(body, { attempts = 5 } = {}) {
     lastError = new Error(`Gemini API ${res.status}: ${errText.slice(0, 300)}`);
     if (![429, 500, 502, 503, 504].includes(res.status)) throw lastError;
     const delay = res.status === 429 ? retryDelayMs(errText) : attempt * 2000;
+    // Interactive callers (voice tools) pass a deadline: a 60s backoff there is
+    // just dead air, so fail now and let the caller say so out loud.
+    if (Date.now() - started + delay > deadlineMs) {
+      console.log(`[gemini] ${res.status} — giving up, ${Math.round(delay / 1000)}s backoff exceeds deadline`);
+      throw lastError;
+    }
     console.log(`[gemini] ${res.status} — retrying in ${Math.round(delay / 1000)}s (attempt ${attempt}/${attempts})`);
     await new Promise((r) => setTimeout(r, delay));
   }
@@ -81,7 +88,7 @@ export async function geminiGenerate(body, { attempts = 5 } = {}) {
 }
 
 /**
- * Same contract as claudeJSON, backed by the Gemini API.
+ * Same contract as anthropicJSON, backed by the Gemini API.
  * Structured output is enforced via responseSchema, so the reply is
  * guaranteed to be valid JSON in the requested shape.
  */
@@ -96,11 +103,24 @@ export async function geminiJSON({ system, prompt, schema, maxTokens = 1500 }) {
     },
   });
 
-  const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
+  const cand = data.candidates?.[0];
+  const finishReason = cand?.finishReason ?? "unknown";
+  const text = cand?.content?.parts?.map((p) => p.text).join("") ?? "";
   if (!text) {
-    throw new Error(
-      `Gemini returned no text (finishReason: ${data.candidates?.[0]?.finishReason ?? "unknown"})`
-    );
+    throw new Error(`Gemini returned no text (finishReason: ${finishReason})`);
   }
-  return JSON.parse(text);
+  // When the model hits maxOutputTokens (finishReason MAX_TOKENS) the JSON comes
+  // back truncated mid-string, so JSON.parse throws "Unterminated string". Turn
+  // that into an actionable error (raise maxTokens) instead of a cryptic crash.
+  // On Gemini 2.5 thinking models, thinking tokens also count against the cap.
+  try {
+    return JSON.parse(text);
+  } catch (parseErr) {
+    if (finishReason === "MAX_TOKENS") {
+      throw new Error(
+        "Gemini hit the output token cap (finishReason: MAX_TOKENS) and returned truncated JSON — raise maxTokens for this call."
+      );
+    }
+    throw new Error(`Gemini returned invalid JSON (finishReason: ${finishReason}): ${String(parseErr.message)}`);
+  }
 }

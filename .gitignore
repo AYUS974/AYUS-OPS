@@ -6,3 +6,6 @@ web/dist/
 *.log
 .DS_Store
 ayus-voice-test.mp3
+last-setup.json
+nul.css
+**/nul.*

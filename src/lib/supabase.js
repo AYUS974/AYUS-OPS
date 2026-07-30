@@ -1,3 +1,11 @@
+// Polyfill globalThis.WebSocket for Node < 22 (e.g. Electron's ELECTRON_RUN_AS_NODE).
+// Must run BEFORE importing @supabase/supabase-js — its WebSocketFactory checks
+// globalThis.WebSocket at construction time and throws if missing.
+import ws from "ws";
+if (typeof globalThis.WebSocket === "undefined") {
+  globalThis.WebSocket = ws;
+}
+
 import { createClient } from "@supabase/supabase-js";
 
 const url = process.env.SUPABASE_URL;
@@ -14,3 +22,4 @@ if (!url || !key) {
 export const db = createClient(url || "http://localhost:54321", key || "missing-key", {
   auth: { persistSession: false },
 });
+

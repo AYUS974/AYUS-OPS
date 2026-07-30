@@ -3,8 +3,26 @@ import { api, getSupabase } from "../lib/api.js";
 import { speak, stopSpeaking, onSpeaking } from "../lib/voice.js";
 import { useAyusVoice } from "../lib/useAyusVoice.js";
 import AyusReactor from "./AyusReactor.jsx";
+import MissionControl from "./MissionControl.jsx";
+import LeadPipeline from "./LeadPipeline.jsx";
+import Workflows from "./Workflows.jsx";
+import KnowledgeVault from "./KnowledgeVault.jsx";
+import Docs from "./Docs.jsx";
 
 const AGENTS = ["sales", "finance", "marketing", "secretary", "hr", "cto"];
+
+// Tracks the <=900px breakpoint so the sidebar can behave as an overlay drawer
+// there (closed by default, dismissible) versus a persistent rail on desktop.
+function useIsMobile() {
+  const [mobile, setMobile] = useState(() => window.matchMedia("(max-width: 900px)").matches);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 900px)");
+    const on = () => setMobile(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return mobile;
+}
 
 const AGENT_NAMES = {
   sales: "Arjun",
@@ -26,12 +44,15 @@ const AGENT_META = {
 
 const NAV_ITEMS = [
   { id: "ayus",      icon: "◈", label: "AYUS" },
+  { id: "missions",  icon: "🛰", label: "Missions" },
+  { id: "workflows", icon: "⚡", label: "Workflows" },
   { id: "agents",    icon: "◎", label: "Agents" },
   { id: "approvals", icon: "✓", label: "Approvals" },
   { id: "insights",  icon: "◴", label: "Insights" },
   { id: "leads",     icon: "◇", label: "Lead Pipeline" },
   { id: "content",   icon: "✎", label: "Content" },
   { id: "vault",     icon: "◫", label: "Knowledge Vault" },
+  { id: "docs",      icon: "▤", label: "Documentation" },
 ];
 
 // The TTS voice key for an agent ("secretary" speaks with the AYUS voice)
@@ -397,10 +418,10 @@ function TopBar({ busy, running, runNow, navCollapsed, onToggleNav }) {
       <button
         className="nav-toggle-btn"
         onClick={onToggleNav}
-        title={navCollapsed ? "Show sidebar" : "Hide sidebar"}
-        aria-label={navCollapsed ? "Show sidebar" : "Hide sidebar"}
+        title="Toggle navigation"
+        aria-label="Toggle navigation"
       >
-        {navCollapsed ? "»" : "☰"}
+        ☰
       </button>
 
       <div className={`topbar-status ${busy ? "is-running" : ""}`}>
@@ -425,7 +446,7 @@ function TopBar({ busy, running, runNow, navCollapsed, onToggleNav }) {
    AGENT NETWORK — hierarchy view (replaces CouncilChamber)
    ================================================================ */
 function AgentNetwork({ actions, busy, filter, onSelectAgent, lastRunFor, countBy, speakingAgent }) {
-  const llmModel = process.env.GEMINI_MODEL || process.env.CLAUDE_MODEL || "gemini-2.5-flash";
+  const llmModel = process.env.GEMINI_MODEL || process.env.ANTHROPIC_MODEL || "gemini-2.5-flash";
 
   return (
     <div className="agent-network">
@@ -468,18 +489,29 @@ function AgentNetwork({ actions, busy, filter, onSelectAgent, lastRunFor, countB
         </div>
       </div>
 
-      {/* Tree connector lines (CSS-driven) */}
-      <svg className="tree-svg" viewBox="0 0 1000 50" preserveAspectRatio="none">
-        {/* Vertical trunk from CEO */}
-        <line x1="500" y1="0" x2="500" y2="20" />
-        {/* Horizontal branch */}
-        <line x1="90" y1="20" x2="910" y2="20" />
-        {/* Drops to each agent */}
-        {AGENTS.map((_, i) => {
-          const x = 90 + (i * (820 / (AGENTS.length - 1)));
-          return <line key={i} x1={x} y1="20" x2={x} y2="50" />;
-        })}
-      </svg>
+      {/* Tree connectors: trunk → rail → one drop per agent. Geometry is
+          derived from the agent count + grid gap so it stays aligned if AGENTS
+          changes; the CSS hides connectors below 1280px (grid then goes 3-wide).
+          Column center i = i·((100%−gaps)/n + gap) + (100%−gaps)/(2n). */}
+      {(() => {
+        const n = AGENTS.length;
+        const gap = 14; // must match .agent-cards-row gap in index.css
+        const gaps = (n - 1) * gap;
+        const edge = `(100% - ${gaps}px) / ${2 * n}`;
+        return (
+          <div className="tree-connectors" aria-hidden="true">
+            <span className="tree-trunk" />
+            <span className="tree-rail" style={{ left: `calc(${edge})`, right: `calc(${edge})` }} />
+            {AGENTS.map((id, i) => (
+              <span
+                key={id}
+                className="tree-drop"
+                style={{ left: `calc(${2 * i + 1} * ${edge} + ${i * gap}px)` }}
+              />
+            ))}
+          </div>
+        );
+      })()}
 
       {/* Agent cards row */}
       <div className="agent-cards-row">
@@ -1115,16 +1147,27 @@ export default function Dashboard({ session }) {
   const [running, setRunning] = useState(false);
   const [filter, setFilter] = useState("all");
   const [isChatOpen, setIsChatOpen] = useState(false);
-  const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem("ayus_nav_collapsed") === "1");
+  // On mobile the sidebar is an overlay drawer that must start CLOSED, so a
+  // desktop-persisted "collapsed" flag can't open it over 0-width content.
+  const isMobile = useIsMobile();
+  const [navCollapsed, setNavCollapsed] = useState(
+    () => !window.matchMedia("(max-width: 900px)").matches && localStorage.getItem("ayus_nav_collapsed") === "1"
+  );
   const [speakingAgent, setSpeakingAgent] = useState(null);
   const speakingRef = useRef(false); // so proactive alerts don't talk over a live reply
 
   const toggleNav = useCallback(() => {
     setNavCollapsed((c) => {
       const next = !c;
-      localStorage.setItem("ayus_nav_collapsed", next ? "1" : "0");
+      // Only desktop collapse is a durable preference; the mobile drawer isn't.
+      if (!window.matchMedia("(max-width: 900px)").matches) {
+        localStorage.setItem("ayus_nav_collapsed", next ? "1" : "0");
+      }
       return next;
     });
+  }, []);
+  const closeMobileNav = useCallback(() => {
+    if (window.matchMedia("(max-width: 900px)").matches) setNavCollapsed(false);
   }, []);
   const [tab, setTab] = useState("ayus"); // ayus | agents | approvals | insights
   const [toast, setToast] = useState(null); // { msg, tone }
@@ -1260,6 +1303,7 @@ export default function Dashboard({ session }) {
   }
 
   const handleSelectAgent = (agentId) => {
+    closeMobileNav();
     if (agentId === "secretary") {
       setIsChatOpen(true);
       setFilter("secretary");
@@ -1290,11 +1334,9 @@ export default function Dashboard({ session }) {
   };
 
   const handleNavChange = (navId) => {
-    if (navId === "ayus" || navId === "agents" || navId === "approvals" || navId === "insights") {
-      setTab(navId);
-      if (navId === "agents") setFilter("all");
-    }
-    // Other nav items can be expanded later
+    setTab(navId);
+    if (navId === "agents") setFilter("all");
+    closeMobileNav(); // a tab pick dismisses the mobile drawer
   };
 
   const actions = data?.actions || [];
@@ -1313,6 +1355,9 @@ export default function Dashboard({ session }) {
         <i className="ambient-grid" />
       </div>
       <div className={`app-shell ${navCollapsed ? "nav-collapsed" : ""}`}>
+        {isMobile && navCollapsed && (
+          <div className="nav-backdrop" onClick={toggleNav} aria-hidden="true" />
+        )}
         <Sidebar
           session={session}
           activeNav={tab}
@@ -1328,13 +1373,21 @@ export default function Dashboard({ session }) {
 
         <TopBar busy={busy} running={running} runNow={runNow} navCollapsed={navCollapsed} onToggleNav={toggleNav} />
 
-        <div className="main-content">
+        <div className={`main-content ${tab === "vault" || tab === "docs" ? "main-content-full" : ""}`}>
           {/* AYUS — dedicated reactor page */}
           {tab === "ayus" && (
             <div className="ayus-page">
               <AyusReactor variant="page" onOpenChat={() => setIsChatOpen(true)} />
             </div>
           )}
+
+          {/* Mission Control — the autonomous-org pipeline */}
+          {tab === "missions" && (
+            <MissionControl showToast={showToast} onProposed={load} />
+          )}
+
+          {/* Workflow Automation — trigger → steps over AYUS's primitives */}
+          {tab === "workflows" && <Workflows showToast={showToast} />}
 
           {/* Agent Network — always visible on agents tab */}
           {tab === "agents" && (
@@ -1467,6 +1520,15 @@ export default function Dashboard({ session }) {
 
           {/* Insights tab */}
           {tab === "insights" && <InsightsPanel active={true} />}
+
+          {/* Lead Pipeline — inbox as a live list + AI scan → leads */}
+          {tab === "leads" && <LeadPipeline showToast={showToast} onChanged={load} />}
+
+          {/* Knowledge Vault — ANISH second brain 2D force graph + note inspector */}
+          {tab === "vault" && <KnowledgeVault showToast={showToast} />}
+
+          {/* Documentation — every repo doc mirrored into the vault, rendered */}
+          {tab === "docs" && <Docs showToast={showToast} />}
         </div>
       </div>
 

@@ -7,14 +7,14 @@ React dashboard (you, behind Supabase Auth)
         │
 Node/Express API ──► Orchestrator (daily cron)
                         │       │        │
-                      Sales  Finance  Marketing   ← each one: fetch data → Claude (structured output) → propose action
+                      Sales  Finance  Marketing   ← each one: fetch data → LLM (structured output) → propose action
                         │       │        │
                             Supabase (single source of truth)
                                 │
                      Approved emails → Resend (logged to sent_emails)
 ```
 
-**Stack:** React (Vite) · Node 20+/Express · Supabase (Postgres + Auth) · Claude API (forced tool-use, so agent output is always valid JSON) · Resend for email.
+**Stack:** React (Vite) · Node 20+/Express · Supabase (Postgres + Auth) · Anthropic API (forced tool-use, so agent output is always valid JSON) · Resend for email.
 
 ## Setup (20 minutes)
 
@@ -73,8 +73,8 @@ Open the **AYUS** page (top of the sidebar) to talk to it — by **typing or voi
 ## How it works
 
 - **Agents never act directly.** They write proposals into the `pending_actions` table. The dashboard shows them; approving executes them via `src/lib/executor.js`.
-- **Structured outputs.** Every model call goes through `src/lib/llm.js`, which enforces a JSON schema on the output (Claude via forced tool-use, Gemini via responseSchema) — no parsing failures, ever. Transient API errors retry automatically.
-- **Swappable LLM provider.** Set `LLM_PROVIDER=anthropic` (default) or `LLM_PROVIDER=gemini` in `.env`. Gemini has a free tier (key from aistudio.google.com), handy for testing; Claude Sonnet is the recommended default for output quality.
+- **Structured outputs.** Every model call goes through `src/lib/llm.js`, which enforces a JSON schema on the output (Anthropic via forced tool-use, Gemini via responseSchema) — no parsing failures, ever. Transient API errors retry automatically.
+- **Swappable LLM provider.** Set `LLM_PROVIDER=anthropic` (default) or `LLM_PROVIDER=gemini` in `.env`. Gemini has a free tier (key from aistudio.google.com), handy for testing; Anthropic Sonnet is the recommended default for output quality.
 - **The orchestrator** (`src/orchestrator.js`) runs all agents in parallel daily (`DAILY_CRON` in `.env`), logs each run to `agent_runs`, and writes a morning digest to `daily_digests`. Agents skip items that already have a proposal waiting, so re-runs never create duplicates.
 - **Auth.** The dashboard logs in via Supabase Auth; every API call is verified server-side (`src/lib/auth.js`). The service-role key never leaves the server.
 - **Email** goes through Resend when `RESEND_API_KEY` is set (console stub otherwise), and every send is recorded in `sent_emails`.
@@ -114,7 +114,7 @@ src/                 Node backend
   index.js           Express app: auth'd API, cron, serves web/dist
   orchestrator.js    runs all agents + writes the daily digest
   agents/            sales, finance, marketing
-  lib/               claude (structured outputs), supabase, auth, email, executor
+  lib/               anthropic (structured outputs), supabase, auth, email, executor
 web/                 React (Vite) dashboard
 supabase/            schema.sql + seed.sql
 Dockerfile           container build (multi-stage)

@@ -81,6 +81,8 @@
   line-height: 1.5;
   color: #b9d2dd;
   min-height: 40px;
+  max-height: 120px;
+  overflow-y: auto;
   max-width: 720px;
 }
 .ayus-reactor-transcript .axu {
@@ -100,6 +102,8 @@
   gap: 10px;
   align-items: center;
   margin-top: 2px;
+  max-width: 720px;
+  width: 100%;
 }
 .ayus-talk-btn,
 .ayus-stop-btn {
@@ -150,7 +154,7 @@
 /* ===== Page variant — AYUS exposed, floating in space (no card) ===== */
 .ayus-page {
   position: relative;
-  min-height: calc(100vh - 150px);
+  min-height: calc(100dvh - 160px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -201,8 +205,8 @@
 }
 .ayus-reactor.is-page .ayus-reactor-canvas-wrap {
   flex: 0 0 auto;
-  width: min(560px, 82vw);
-  height: min(560px, 82vw);
+  width: max(220px, min(560px, 82vw, calc(100dvh - 420px)));
+  height: max(220px, min(560px, 82vw, calc(100dvh - 420px)));
   overflow: visible;
 }
 .ayus-reactor.is-page .ayus-reactor-head {

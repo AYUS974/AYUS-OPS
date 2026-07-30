@@ -1,36 +1,56 @@
 :root {
-  --bg: #070913;
-  --bg-grad: radial-gradient(1300px 600px at 50% 0%, #11152c 0%, #070913 70%);
-  --panel: rgba(15, 22, 42, 0.55);
-  --panel-hover: rgba(22, 32, 60, 0.65);
-  --panel-2: rgba(25, 34, 64, 0.7);
-  --line: rgba(56, 189, 248, 0.12);
-  --line-strong: rgba(56, 189, 248, 0.22);
-  --line-soft: rgba(255, 255, 255, 0.04);
-  --ink: #E2E8F0;
-  --ink-bright: #F8FAFC;
-  --muted: #64748B;
-  --muted-bright: #94A3B8;
-  
-  /* Neon Accents */
-  --pending: #F59E0B;     /* Amber Gold */
-  --approve: #10B981;     /* Emerald Green */
-  --reject: #EF4444;      /* Cyber Crimson */
-  --sales: #0EA5E9;       /* Electric Cyan */
-  --finance: #A855F7;     /* Neon Violet */
-  --marketing: #F97316;   /* Coral Orange */
-  --secretary: #F43F5E;   /* Rose Coral */
-  --hr: #5EEAD4;          /* Teal */
-  --cto: #FACC15;         /* Amber */
-  
+  /* AYUS Labs flagship palette — warm gold/ember/cyan on near-black.
+     Matched to ayus-universal-hub (Syne + Space Grotesk). */
+  --gold: #e8a838;        /* THE signature accent */
+  --ember: #c44b2c;       /* rare secondary */
+  --cyan: #2ca5c4;        /* rare tertiary */
+
+  --bg: #06060a;
+  --bg-grad: radial-gradient(1300px 600px at 50% 0%, #14110b 0%, #06060a 72%);
+  --panel: rgba(12, 12, 20, 0.6);
+  --panel-hover: rgba(18, 18, 28, 0.7);
+  --panel-2: rgba(22, 22, 34, 0.72);
+  --line: rgba(232, 168, 56, 0.14);
+  --line-strong: rgba(232, 168, 56, 0.26);
+  --line-soft: rgba(255, 255, 255, 0.05);
+  --ink: #f0ece4;
+  --ink-bright: #fbf8f2;
+  --muted: #6b6878;
+  --muted-bright: #9a95a8;
+
+  /* Neon Accents — brand chrome shifted onto the flagship trio; approve/reject
+     keep their semantic green/red. */
+  --pending: #e8a838;     /* Gold */
+  --approve: #10B981;     /* Emerald Green (semantic) */
+  --reject: #c44b2c;      /* Ember (semantic destructive) */
+  --sales: #2ca5c4;       /* Cyan */
+  --finance: #e8a838;     /* Gold */
+  --marketing: #c44b2c;   /* Ember */
+  --secretary: #e8a838;   /* Gold */
+  --hr: #2ca5c4;          /* Cyan */
+  --cto: #e8a838;         /* Gold */
+
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: "Space Grotesk", system-ui, -apple-system, sans-serif;
+  --display: "Syne", "Space Grotesk", system-ui, sans-serif;
   --radius: 14px;
   --radius-sm: 8px;
   --transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 
   --sidebar-w: 260px;
   --topbar-h: 56px;
+
+  /* Spacing scale — new/edited paddings, gaps and margins snap to this. */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-7: 32px;
+
+  /* Reading-width cap so 1920px screens get margins, not 1600px ribbons. */
+  --content-max: 1440px;
 }
 
 * { 
@@ -41,10 +61,10 @@
 
 body {
   background-color: var(--bg);
-  background-image: 
+  background-image:
     var(--bg-grad),
-    linear-gradient(rgba(56, 189, 248, 0.015) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(56, 189, 248, 0.015) 1px, transparent 1px);
+    linear-gradient(rgba(232, 168, 56, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(232, 168, 56, 0.018) 1px, transparent 1px);
   background-size: 100% 100%, 30px 30px, 30px 30px;
   background-attachment: fixed;
   color: var(--ink);
@@ -54,9 +74,15 @@ body {
   overflow-x: hidden;
 }
 
-a { 
-  color: inherit; 
-  text-decoration: none; 
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Syne display face for headings — the hub's signature look. */
+h1, h2, h3, .display, .brand {
+  font-family: var(--display);
+  letter-spacing: -0.02em;
 }
 
 .mono { font-family: var(--mono); }
@@ -85,12 +111,14 @@ a {
   box-shadow: 0 10px 35px 0 rgba(0, 0, 0, 0.45);
 }
 
-.center-screen { 
-  min-height: 100vh; 
-  display: flex; 
-  align-items: center; 
-  justify-content: center; 
-  padding: 20px; 
+.center-screen {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s-5);
+  position: relative;
 }
 
 /* ================================================================
@@ -99,8 +127,10 @@ a {
 .app-shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
-  grid-template-rows: var(--topbar-h) 1fr;
-  min-height: 100vh;
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr);
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
   position: relative;
 }
 
@@ -115,10 +145,7 @@ a {
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
-  position: fixed;
-  top: 0;
-  left: 0;
-  bottom: 0;
+  min-height: 0;
   z-index: 100;
   overflow-y: auto;
   backdrop-filter: blur(20px);
@@ -155,7 +182,7 @@ a {
 }
 
 .sidebar-logo {
-  padding: 22px 20px 18px;
+  padding: var(--s-4) var(--s-5) var(--s-3);
   border-bottom: 1px solid var(--line-soft);
 }
 .sidebar-logo .wordmark { 
@@ -195,7 +222,7 @@ a {
 
 /* Sidebar Nav */
 .sidebar-nav {
-  padding: 14px 12px 0;
+  padding: 10px var(--s-3) 0;
 }
 .sidebar-nav-label {
   font-family: var(--mono);
@@ -210,7 +237,7 @@ a {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 12px;
+  padding: 7px 12px;
   border-radius: var(--radius-sm);
   font-size: 13px;
   color: var(--muted-bright);
@@ -263,13 +290,13 @@ a {
   letter-spacing: 0.16em;
   color: var(--muted);
   text-transform: uppercase;
-  padding: 14px 8px 8px;
+  padding: 10px 8px 6px;
 }
 .sidebar-agent-card {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
+  padding: 6px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: var(--transition);
@@ -357,7 +384,7 @@ a {
 
 /* Sign-out in sidebar */
 .sidebar-footer {
-  padding: 12px 12px 16px;
+  padding: 10px var(--s-3) var(--s-3);
   border-top: 1px solid var(--line-soft);
   margin-top: auto;
 }
@@ -394,8 +421,7 @@ a {
   border-bottom: 1px solid var(--line-soft);
   background: rgba(8, 12, 24, 0.6);
   backdrop-filter: blur(16px);
-  position: sticky;
-  top: 0;
+  min-width: 0;
   z-index: 50;
 }
 .topbar-status {
@@ -488,9 +514,17 @@ a {
 .main-content {
   grid-column: 2;
   grid-row: 2;
-  padding: 28px 32px 80px;
+  min-height: 0;
+  padding: var(--s-6) var(--s-7) 80px;
   overflow-y: auto;
   position: relative;
+}
+/* Every tab's top-level blocks share one measure — wide screens get
+   margins instead of edge-to-edge ribbons. */
+.main-content > * {
+  max-width: var(--content-max);
+  margin-left: auto;
+  margin-right: auto;
 }
 
 /* ================================================================
@@ -693,18 +727,9 @@ a {
   background: var(--line-strong);
   margin: 0 auto;
 }
-.tree-branches {
+.tree-rail {
   position: absolute;
   top: 20px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-}
-.tree-branch-line {
-  position: absolute;
-  top: 0;
   height: 1.5px;
   background: var(--line-strong);
 }
@@ -713,16 +738,22 @@ a {
   height: 30px;
   background: var(--line-strong);
   position: absolute;
-  top: 0;
+  top: 20px;
 }
 
-/* Agent cards row */
+/* Agent cards row — fixed 6 columns while the tree connectors are visible,
+   so drop lines always land on card centers; below 1280px the tree hides
+   and the grid relaxes to 3 columns. */
 .agent-cards-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 14px;
   position: relative;
   z-index: 2;
+}
+@media (max-width: 1279px) {
+  .agent-cards-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .tree-connectors { display: none; }
 }
 
 .agent-card {
@@ -890,19 +921,6 @@ a {
 .a-hr .agent-card-avatar { color: var(--hr); border-color: rgba(94, 234, 212, 0.3); }
 .a-cto .agent-card-avatar { color: var(--cto); border-color: rgba(250, 204, 21, 0.3); }
 
-/* SVG Tree Lines */
-.tree-svg {
-  width: 100%;
-  height: 50px;
-  display: block;
-  margin: 0 auto;
-  overflow: visible;
-}
-.tree-svg line {
-  stroke: rgba(56, 189, 248, 0.18);
-  stroke-width: 1.5;
-}
-
 /* ================================================================
    CONTENT BELOW NETWORK — tabs, approvals, insights
    ================================================================ */
@@ -1042,8 +1060,8 @@ a {
   gap: 28px; 
   align-items: start; 
 }
-@media (max-width: 1100px) { 
-  .columns { grid-template-columns: 1fr; } 
+@media (max-width: 1280px) {
+  .columns { grid-template-columns: 1fr; }
 }
 
 /* ---------- Queue Head ---------- */
@@ -1467,56 +1485,125 @@ a {
 @keyframes shimmer { to { background-position: -200% 0; } }
 
 /* ---------- Secure Login Portal ---------- */
+.login-backdrop-glow {
+  position: absolute;
+  width: 300px;
+  height: 300px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(168, 85, 247, 0.08) 0%, transparent 70%);
+  filter: blur(40px);
+  pointer-events: none;
+}
 .login-card {
   width: min(390px, 100%);
   background: rgba(16, 22, 42, 0.55);
   backdrop-filter: blur(20px);
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius); 
-  padding: 35px 30px;
-  display: flex; 
+  border-radius: var(--radius);
+  padding: var(--s-7) 30px;
+  display: flex;
   flex-direction: column;
-  box-shadow: 
+  position: relative;
+  z-index: 1;
+  box-shadow:
     0 25px 70px rgba(0,0,0,0.6),
     0 0 40px rgba(56, 189, 248, 0.04);
 }
+.login-card .wordmark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: var(--s-6);
+}
+.login-card .wordmark h1 {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  background: linear-gradient(135deg, var(--ink-bright) 40%, var(--sales) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.login-card .wordmark span {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--sales);
+  border: 1px solid var(--line-strong);
+  border-radius: 99px;
+  padding: 2px 8px;
+  background: rgba(14, 165, 229, 0.05);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.login-title {
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  color: var(--muted-bright);
+  margin-bottom: var(--s-4);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.login-field + .login-field {
+  margin-top: var(--s-3);
+}
 .login-label {
-  font-family: var(--mono); 
-  font-size: 10.5px; 
+  font-family: var(--mono);
+  font-size: 10.5px;
   letter-spacing: 0.12em;
-  text-transform: uppercase; 
-  color: var(--muted-bright); 
-  margin: 16px 0 6px;
+  text-transform: uppercase;
+  color: var(--muted-bright);
   font-weight: 500;
 }
 .login-card input {
-  font-family: var(--sans); 
-  font-size: 14.5px;
-  background: rgba(5, 7, 16, 0.8); 
+  font-family: var(--mono);
+  font-size: 13px;
+  background: rgba(5, 7, 16, 0.6);
   color: var(--ink-bright);
-  border: 1px solid var(--line); 
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
   border-radius: var(--radius-sm);
   padding: 12px 14px;
   transition: var(--transition);
 }
-.login-card input:focus { 
-  outline: none; 
-  border-color: var(--sales); 
+.login-card input:focus {
+  outline: none;
+  border-color: var(--sales);
   box-shadow: 0 0 15px rgba(14, 165, 229, 0.25);
   background: #050710;
 }
-.login-btn { 
-  margin-top: 25px; 
-  padding: 12px 20px; 
+.login-btn {
+  margin-top: var(--s-6);
+  padding: 13px 20px;
   background: linear-gradient(135deg, var(--sales) 0%, var(--finance) 100%);
   color: #04060c;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 12px;
+  cursor: pointer;
+  transition: var(--transition);
   box-shadow: 0 4px 25px rgba(168, 85, 247, 0.25);
 }
+.login-btn:hover { transform: translateY(-1px); }
+.login-btn:disabled { opacity: 0.6; cursor: wait; transform: none; }
 .login-error {
-  font-family: var(--mono); 
-  font-size: 12.5px; 
+  font-family: var(--mono);
+  font-size: 12px;
   color: var(--reject);
-  margin-top: 14px; 
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  background: rgba(239, 68, 68, 0.05);
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  margin-top: var(--s-4);
   line-height: 1.5;
   text-align: center;
 }
@@ -1951,7 +2038,7 @@ a {
 
 /* Insights panel */
 .insights { margin: 0; }
-.ins-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.ins-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
 .ins-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
 .ins-card.ins-wide { grid-column: 1 / -1; }
 .ins-card.ins-health { grid-row: span 1; text-align: center; }
@@ -1970,7 +2057,7 @@ a {
 .ins-bar-fill.bad { background: var(--reject); }
 .ins-bar-val { font-family: var(--mono); font-size: 11px; color: var(--ink); text-align: right; }
 
-.ins-money { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.ins-money { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
 .ins-money-tile { background: rgba(255,255,255,0.02); border: 1px solid var(--line-soft); border-radius: var(--radius-sm); padding: 8px; }
 .ins-money-tile span { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 3px; }
 .ins-money-tile b { font-size: 14px; font-weight: 600; color: var(--ink-bright); }
@@ -1981,9 +2068,9 @@ a {
 /* 14-day sparkline */
 .spark { display: flex; align-items: flex-end; gap: 5px; height: 100px; padding-top: 8px; }
 .spark-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }
-.spark-bar { width: 100%; max-width: 22px; min-height: 3px; background: color-mix(in srgb, var(--sales) 30%, transparent); border-radius: 3px 3px 0 0; display: flex; align-items: flex-end; transition: height 0.5s ease; }
+.spark-bar { width: 100%; max-width: 40px; min-height: 3px; background: color-mix(in srgb, var(--sales) 30%, transparent); border-radius: 3px 3px 0 0; display: flex; align-items: flex-end; transition: height 0.5s ease; }
 .spark-exec { width: 100%; background: var(--approve); border-radius: 3px 3px 0 0; }
-.spark-day { font-family: var(--mono); font-size: 8px; color: var(--muted); margin-top: 4px; }
+.spark-day { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 4px; }
 .legend-dot { width: 8px; height: 8px; border-radius: 3px; display: inline-block; }
 .legend-dot.lg-prop { background: color-mix(in srgb, var(--sales) 40%, transparent); }
 .legend-dot.lg-exec { background: var(--approve); }
@@ -2041,22 +2128,47 @@ a {
 
 /* Respect reduced-motion */
 @media (prefers-reduced-motion: reduce) {
-  .ambient span, .ambient-grid, .voice-viz i, .dot-mini, .stat::after { animation: none !important; }
+  .ambient span, .ambient-grid, .voice-viz i, .mini-dot, .stat::after,
+  .top-dot, .lamp, .status-dot, .trigger-pulse { animation: none !important; }
 }
 
 /* ================================================================
    RESPONSIVE — Sidebar collapses on mobile
    ================================================================ */
 @media (max-width: 900px) {
-  .app-shell {
+  .app-shell,
+  /* nav-collapsed means "drawer open" here, not the desktop 0-column collapse —
+     keep content full width under the overlay. */
+  .app-shell.nav-collapsed {
     grid-template-columns: 1fr;
-    grid-template-rows: var(--topbar-h) 1fr;
+    grid-template-rows: var(--topbar-h) minmax(0, 1fr);
   }
+  /* Sidebar becomes an overlay drawer. Hidden by default; the topbar
+     toggle slides it in over the content. */
   .sidebar {
-    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(300px, 84vw);
+    transform: translateX(-100%);
+    box-shadow: 30px 0 80px rgba(0, 0, 0, 0.55);
+  }
+  .app-shell.nav-collapsed .sidebar {
+    transform: translateX(0);
+  }
+  /* Tap-out backdrop; rendered by JS only while the drawer is open. */
+  .nav-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(2px);
+    animation: fadeIn 0.2s ease;
   }
   .topbar {
     grid-column: 1;
+    padding: 0 16px;
   }
   .main-content {
     grid-column: 1;
@@ -2070,13 +2182,6 @@ a {
   .ceo-stats {
     justify-content: center;
   }
-  .agent-cards-row {
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 10px;
-  }
-  .columns { grid-template-columns: 1fr; }
-  .ins-grid { grid-template-columns: 1fr 1fr; }
-  .ins-money { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 580px) {

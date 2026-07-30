@@ -1,7 +1,8 @@
 // Voice engine: tries the server's /api/tts (ElevenLabs, if a key is set);
 // otherwise falls back to the browser's built-in speechSynthesis — free,
 // no key, works offline. Speech input uses the Web Speech API.
-import { getSupabase } from "./api.js";
+import { getAccessToken } from "./api.js";
+import { startWakeListener, stopWakeListener } from "./wakeword.js";
 
 let voicesCache = [];
 let currentAudio = null;
@@ -54,7 +55,210 @@ function cleanForSpeech(text) {
     .slice(0, 600);
 }
 
+// --- Barge-in listener: "say AYUS to interrupt" during TTS ----------------
+// While AYUS is speaking, a background mic session listens for the user saying
+// "AYUS [command]". Transcription goes through Groq Whisper (server-side). Only
+// transcripts starting with "AYUS" (or common mis-hearings) are honoured — all
+// other noise is silently discarded.
+//
+// This complements the Picovoice Porcupine listener (wakeword.js), which gives
+// instant (~100ms) keyword detection when configured but can't capture the
+// follow-up command. The barge-in listener captures the FULL utterance including
+// the command after the wake word. Both run in parallel if available.
+
+const BARGE_RE = /^(hello\s+|hey\s+|ok\s+|are\s+|hi\s+)?(ayus|ayush|आयुष|एयुस|एयूस)\b/i;
+let bargeInStream = null;
+let bargeInCtx = null;
+let bargeInRecorder = null;
+let bargeInActive = false;
+let bargeInListeners = new Set(); // subscribers: fn(command: string | null)
+
+/** Subscribe to barge-in events. Called with the command after "AYUS" (or null
+ *  if the user just said "AYUS" with nothing after it). Returns unsubscribe. */
+export function onBargeIn(fn) {
+  bargeInListeners.add(fn);
+  return () => bargeInListeners.delete(fn);
+}
+
+function notifyBargeIn(command) {
+  for (const fn of bargeInListeners) fn(command);
+}
+
+// Transcribe a blob via the server's /api/stt (Groq Whisper).
+async function bargeInTranscribe(blob) {
+  try {
+    const token = await getAccessToken();
+    if (!token) return null;
+    const type = blob.type || "audio/webm";
+    const ext = type.includes("ogg") ? "ogg" : type.includes("mp4") ? "mp4" : "webm";
+    const res = await fetch(`/api/stt?ext=${ext}`, {
+      method: "POST",
+      headers: { "Content-Type": type, Authorization: `Bearer ${token}` },
+      body: blob,
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return String(json.text || "").trim();
+  } catch {
+    return null;
+  }
+}
+
+function startBargeInListener() {
+  if (bargeInActive) return;
+  bargeInActive = true;
+  console.log("%c[barge-in]", "color:#f59e0b", "starting listener during TTS");
+
+  // We'll run a series of short recording segments (~2-3 seconds each) back to
+  // back. Each segment is transcribed; if it starts with "AYUS" we act on it.
+  // This loop runs until stopBargeInListener() sets bargeInActive = false.
+  (async function loop() {
+    try {
+      bargeInStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (err) {
+      console.warn("[barge-in] mic access failed:", err?.message);
+      bargeInActive = false;
+      return;
+    }
+
+    bargeInCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (bargeInCtx.state === "suspended") await bargeInCtx.resume().catch(() => {});
+    // Pull it back if the browser suspends on backgrounding.
+    bargeInCtx.onstatechange = () => {
+      if (bargeInCtx?.state === "suspended") bargeInCtx.resume().catch(() => {});
+    };
+
+    const source = bargeInCtx.createMediaStreamSource(bargeInStream);
+    const processor = bargeInCtx.createScriptProcessor(2048, 1, 1);
+    const sink = bargeInCtx.createGain();
+    sink.gain.value = 0;
+    source.connect(processor);
+    processor.connect(sink);
+    sink.connect(bargeInCtx.destination);
+
+    // State for the recording loop.
+    const SPEECH_THRESHOLD = 0.015;
+    const MIN_PEAK_RMS = 0.04;
+    const SILENCE_SEC = 0.9;
+    const MAX_SEG_SEC = 4;
+
+    let sawSpeech = false;
+    let peakRms = 0;
+    let lastVoiceAt = bargeInCtx.currentTime;
+    let segStartAt = bargeInCtx.currentTime;
+    let chunks = [];
+
+    const mime = (() => {
+      const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
+      return candidates.find((m) => window.MediaRecorder?.isTypeSupported?.(m)) || "";
+    })();
+
+    bargeInRecorder = new MediaRecorder(bargeInStream, mime ? { mimeType: mime } : undefined);
+    bargeInRecorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+
+    // When a segment ends (stop() is called), transcribe and check for "AYUS".
+    bargeInRecorder.onstop = async () => {
+      const blob = chunks.length ? new Blob(chunks, { type: bargeInRecorder?.mimeType || "audio/webm" }) : null;
+      const hadSpeech = sawSpeech && peakRms >= MIN_PEAK_RMS;
+
+      // Reset for next segment.
+      chunks = [];
+      sawSpeech = false;
+      peakRms = 0;
+      segStartAt = bargeInCtx?.currentTime || 0;
+      lastVoiceAt = segStartAt;
+
+      if (blob && hadSpeech) {
+        const text = await bargeInTranscribe(blob);
+        if (text) {
+          console.log("%c[barge-in]", "color:#f59e0b", "transcribed:", JSON.stringify(text));
+          const match = text.match(BARGE_RE);
+          if (match) {
+            // Extract command after "AYUS" — e.g. "AYUS play some music" → "play some music"
+            const idx = text.toLowerCase().lastIndexOf(match[2].toLowerCase());
+            const command = text.slice(idx + match[2].length).replace(/^[\s,.!?]+/, "").trim();
+            console.log("%c[barge-in]", "color:#f59e0b", "AYUS detected! command:", JSON.stringify(command || "(none)"));
+            stopSpeaking(); // interrupt TTS
+            notifyBargeIn(command || null);
+            stopBargeInListener();
+            return; // don't start next segment
+          }
+          // Not an AYUS command — discard silently.
+          console.log("%c[barge-in]", "color:#f59e0b", "discarded (no AYUS prefix)");
+        }
+      }
+
+      // Start next segment if still active.
+      if (bargeInActive && bargeInRecorder && bargeInStream?.active) {
+        try {
+          bargeInRecorder.start();
+        } catch {
+          /* stream or recorder was torn down */
+        }
+      }
+    };
+
+    // VAD — runs on the audio thread via ScriptProcessor (not throttled in
+    // background tabs). Ends each segment on silence or timeout.
+    processor.onaudioprocess = (e) => {
+      if (!bargeInActive || !bargeInRecorder || bargeInRecorder.state !== "recording") return;
+      const input = e.inputBuffer.getChannelData(0);
+      let sum = 0;
+      for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+      const rms = Math.sqrt(sum / input.length);
+      peakRms = Math.max(peakRms, rms);
+
+      const now = bargeInCtx.currentTime;
+      if (rms > SPEECH_THRESHOLD) {
+        sawSpeech = true;
+        lastVoiceAt = now;
+      } else if (sawSpeech && now - lastVoiceAt >= SILENCE_SEC) {
+        // Silence after speech — end segment, transcribe.
+        try { bargeInRecorder.stop(); } catch { /* already stopped */ }
+        return;
+      }
+      if (now - segStartAt >= MAX_SEG_SEC) {
+        // Safety cap — end segment even if still talking, so latency stays low.
+        try { bargeInRecorder.stop(); } catch { /* already stopped */ }
+      }
+    };
+
+    // Kick off the first segment.
+    bargeInRecorder.start();
+  })();
+}
+
+function stopBargeInListener() {
+  if (!bargeInActive) return;
+  bargeInActive = false;
+  console.log("%c[barge-in]", "color:#f59e0b", "stopping listener");
+  if (bargeInRecorder && bargeInRecorder.state !== "inactive") {
+    try {
+      bargeInRecorder.onstop = null; // suppress the transcription on teardown
+      bargeInRecorder.stop();
+    } catch { /* already stopped */ }
+  }
+  bargeInRecorder = null;
+  bargeInStream?.getTracks().forEach((t) => t.stop());
+  bargeInStream = null;
+  bargeInCtx?.close().catch(() => {});
+  bargeInCtx = null;
+}
+
 function notifySpeaking(isSpeaking, agent) {
+  // Keyword barge-in: listen for "AYUS" only while AYUS is speaking, and cut the
+  // speech off the instant it's heard (→ the usual re-arm opens the mic for your
+  // reply). No-op unless Picovoice is configured. Not used by the Gemini Live
+  // path, which plays PCM directly and has its own native barge-in.
+  if (isSpeaking) {
+    startWakeListener(() => stopSpeaking());
+    startBargeInListener(); // Whisper-based "AYUS [command]" listener
+  } else {
+    stopWakeListener();
+    stopBargeInListener();
+  }
   for (const fn of speakingListeners) fn(isSpeaking, agent);
 }
 
@@ -95,8 +299,7 @@ export function stopSpeaking() {
 // voice. Resolves when the clip ends. Does not touch speaking-state itself.
 async function playClip(clean, agent) {
   try {
-    const { data } = await getSupabase().auth.getSession();
-    const token = data?.session?.access_token;
+    const token = await getAccessToken();
     const res = await fetch("/api/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -246,8 +449,7 @@ function isJunkTranscript(text) {
 
 async function transcribeBlob(blob) {
   vlog("transcribe: posting", blob.size, "bytes", blob.type);
-  const { data } = await getSupabase().auth.getSession();
-  const token = data?.session?.access_token;
+  const token = await getAccessToken();
   if (!token) vlog("transcribe: WARNING no auth token — /api/stt will 401");
   const type = blob.type || "audio/webm";
   const ext = type.includes("ogg") ? "ogg" : type.includes("mp4") ? "mp4" : "webm";
@@ -472,18 +674,35 @@ export function createGeminiLiveSession({
   let playbackCtx = null;
   let nextPlayTime = 0;
   let active = true;
+  let activeSources = []; // scheduled playback nodes, so barge-in can stop them
+  let userTurnText = ""; // accumulates streamed input/output transcripts per turn
+  let modelTurnText = "";
 
   // Initialize playback AudioContext
   playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
   nextPlayTime = playbackCtx.currentTime;
 
-  // 1. Establish WebSocket Connection to Backend
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const host = window.location.host;
-  const wsUrl = `${protocol}//${host}/api/secretary/live`;
-  
-  console.log("[live-ws] Connecting to live session:", wsUrl);
-  ws = new WebSocket(wsUrl);
+  // 1. Establish WebSocket Connection to Backend. The live socket is authed via
+  // a Supabase token in the query string (WebSockets can't send headers).
+  connect();
+
+  async function connect() {
+    let token = "";
+    try {
+      token = (await getAccessToken()) || "";
+    } catch {
+      /* no session — server will reject with 401 */
+    }
+    if (!active) return;
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = window.location.host;
+    const wsUrl = `${protocol}//${host}/api/secretary/live?token=${encodeURIComponent(token)}`;
+    console.log("[live-ws] Connecting to live session");
+    ws = new WebSocket(wsUrl);
+    wireSocket();
+  }
+
+  function wireSocket() {
 
   ws.onopen = async () => {
     console.log("[live-ws] Connection established. Initializing mic...");
@@ -541,31 +760,40 @@ export function createGeminiLiveSession({
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data);
-      if (msg.serverContent) {
-        // Handle User Turn transcription
-        if (msg.serverContent.userTurn) {
-          const parts = msg.serverContent.userTurn.parts || [];
-          let userText = "";
-          for (const part of parts) {
-            if (part.text) userText += part.text;
-          }
-          if (userText) {
-            onUserText?.(userText);
-          }
-        }
+      const sc = msg.serverContent;
+      if (!sc) return;
 
-        // Handle Model Response
-        if (msg.serverContent.modelTurn) {
-          const parts = msg.serverContent.modelTurn.parts || [];
-          for (const part of parts) {
-            if (part.inlineData && part.inlineData.data) {
-              playPCMChunk(part.inlineData.data);
-            }
-            if (part.text) {
-              onText?.(part.text);
-            }
-          }
+      // Barge-in: Gemini's own VAD flags when the user talks over AYUS. Stop the
+      // queued audio immediately so AYUS goes quiet the instant you cut in.
+      if (sc.interrupted) {
+        flushPlayback();
+        modelTurnText = "";
+      }
+
+      // Live captions. Gemini streams both transcripts token-by-token (enabled by
+      // input/outputAudioTranscription in the server setup), so accumulate per turn.
+      if (sc.inputTranscription?.text) {
+        userTurnText += sc.inputTranscription.text;
+        onUserText?.(userTurnText);
+      }
+      if (sc.outputTranscription?.text) {
+        modelTurnText += sc.outputTranscription.text;
+        onText?.(modelTurnText);
+      }
+
+      // Model audio (AUDIO modality) — and rare inline text.
+      for (const part of sc.modelTurn?.parts || []) {
+        if (part.inlineData?.data) playPCMChunk(part.inlineData.data);
+        if (part.text) {
+          modelTurnText += part.text;
+          onText?.(modelTurnText);
         }
+      }
+
+      // Turn done → reset transcript buffers for the next exchange.
+      if (sc.turnComplete) {
+        userTurnText = "";
+        modelTurnText = "";
       }
     } catch (err) {
       console.error("[live-ws] Error handling incoming WS message:", err);
@@ -582,6 +810,7 @@ export function createGeminiLiveSession({
     teardown();
     onEnd?.();
   };
+  } // end wireSocket
 
   function playPCMChunk(base64Data) {
     if (!playbackCtx) return;
@@ -609,6 +838,11 @@ export function createGeminiLiveSession({
       const source = playbackCtx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(playbackCtx.destination);
+      // Track scheduled nodes so barge-in can stop them; drop each when it ends.
+      activeSources.push(source);
+      source.onended = () => {
+        activeSources = activeSources.filter((s) => s !== source);
+      };
 
       const now = playbackCtx.currentTime;
       if (nextPlayTime < now) {
@@ -619,6 +853,21 @@ export function createGeminiLiveSession({
     } catch (err) {
       console.error("[live-ws] Error playing audio chunk:", err);
     }
+  }
+
+  // Stop and drop every queued playback node — used on barge-in so AYUS's voice
+  // cuts out the instant the user speaks over it.
+  function flushPlayback() {
+    for (const s of activeSources) {
+      try {
+        s.onended = null;
+        s.stop();
+      } catch {
+        /* already stopped */
+      }
+    }
+    activeSources = [];
+    if (playbackCtx) nextPlayTime = playbackCtx.currentTime;
   }
 
   function teardown() {

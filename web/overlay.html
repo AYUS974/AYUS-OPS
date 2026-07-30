@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>AYUS — Assistant</title>
+<style>
+  :root{
+    --accent:#22d3ee;
+    --live:#34d399;   /* listening */
+    --warn:#fbbf24;   /* speaking / interruptible */
+    --ink:#eaf6fb;
+    --muted:#7e96a3;
+    --mono:'SFMono-Regular',ui-monospace,'JetBrains Mono','Cascadia Code',Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:transparent;overflow:hidden}
+  body{
+    padding:6px;                        /* transparent gutter so the glow isn't clipped */
+    font-family:var(--mono);
+    color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+    user-select:none;
+  }
+  .card{
+    -webkit-app-region:drag;            /* drag from anywhere; controls opt out below */
+    border-radius:14px;
+    background:linear-gradient(180deg, rgba(10,20,34,.93), rgba(6,12,22,.96));
+    border:1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    box-shadow:0 8px 30px rgba(0,0,0,.55), 0 0 30px color-mix(in srgb, var(--accent) 12%, transparent),
+      inset 0 0 0 1px rgba(255,255,255,.02);
+    overflow:hidden;
+  }
+  .card.listening{border-color:color-mix(in srgb, var(--live) 55%, transparent)}
+  .card.speaking{border-color:color-mix(in srgb, var(--warn) 55%, transparent)}
+
+  /* ---- one compact status row: orb + live state + actions ---- */
+  .bar{display:flex;align-items:center;gap:8px;padding:6px 8px}
+  .orb{
+    flex:0 0 auto;width:16px;height:16px;border-radius:50%;
+    background:radial-gradient(circle at 50% 42%, #fff 0%, var(--accent) 42%, color-mix(in srgb,var(--accent) 0%, transparent) 72%);
+    box-shadow:0 0 10px color-mix(in srgb, var(--accent) 70%, transparent);
+    animation:pulse 3.2s ease-in-out infinite;
+    transition:transform .08s linear;
+  }
+  .card.thinking .orb{animation-duration:.9s}
+  .card.listening .orb{background:radial-gradient(circle at 50% 42%, #fff 0%, var(--live) 42%, transparent 72%);box-shadow:0 0 12px var(--live);animation:none}
+  .card.speaking  .orb{background:radial-gradient(circle at 50% 42%, #fff 0%, var(--warn) 42%, transparent 72%);box-shadow:0 0 12px var(--warn)}
+  @keyframes pulse{0%,100%{transform:scale(.9);opacity:.85}50%{transform:scale(1.08);opacity:1}}
+
+  .state{flex:1;min-width:0;font-size:11px;letter-spacing:.06em;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .state b{color:var(--ink);font-weight:600;letter-spacing:.28em}
+  .card.listening .state{color:var(--live)}
+  .card.speaking .state{color:var(--warn)}
+
+  .btn{
+    -webkit-app-region:no-drag;cursor:pointer;flex:0 0 auto;
+    width:24px;height:24px;display:grid;place-items:center;
+    border:1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+    background:color-mix(in srgb, var(--accent) 8%, transparent);
+    color:var(--ink);border-radius:7px;font-size:12px;line-height:1;transition:.15s;
+  }
+  .btn:hover{background:color-mix(in srgb, var(--accent) 20%, transparent);border-color:var(--accent)}
+  .btn:disabled{opacity:.5;cursor:default}
+  .mic.on{border-color:var(--live);background:color-mix(in srgb, var(--live) 22%, transparent);color:#fff}
+  .mic.stop{border-color:var(--warn);background:color-mix(in srgb, var(--warn) 22%, transparent);color:#fff}
+
+  /* ---- transcript (hidden until it has content) ---- */
+  .log{-webkit-app-region:no-drag;max-height:200px;overflow-y:auto;padding:0 10px;user-select:text}
+  .log:empty{display:none}
+  .log .you,.log .ai{font-size:12px;line-height:1.45;padding:2px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+  .log .you{color:var(--ink)}
+  .log .you::before{content:"YOU ";color:var(--muted);font-size:9px;letter-spacing:.14em}
+  .log .ai{color:var(--accent)}
+  .log .ai::before{content:"AYUS ";color:var(--muted);font-size:9px;letter-spacing:.14em}
+  .log .interim{color:var(--muted);font-style:italic}
+  .log .err{color:#ff7a90}
+
+  /* ---- attached-screenshot chip ---- */
+  .chip{
+    display:none;align-items:center;gap:6px;margin:1px 10px 0;
+    font-size:10px;color:var(--accent);letter-spacing:.04em;
+  }
+  .chip b{color:var(--ink);font-weight:600}
+  .chip .x{-webkit-app-region:no-drag;cursor:pointer;color:var(--muted);padding:0 3px}
+  .chip .x:hover{color:var(--ink)}
+
+  /* ---- input row ---- */
+  .row{display:flex;gap:6px;align-items:center;padding:6px 8px 8px}
+  .row input{
+    -webkit-app-region:no-drag;flex:1;min-width:0;
+    background:rgba(8,16,28,.7);border:1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    color:var(--ink);border-radius:9px;padding:7px 10px;font-family:var(--mono);font-size:12px;outline:none;
+  }
+  .row input:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent)}
+  .send{
+    -webkit-app-region:no-drag;cursor:pointer;flex:0 0 auto;
+    width:32px;height:32px;display:grid;place-items:center;
+    border:1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+    background:color-mix(in srgb, var(--accent) 12%, transparent);
+    color:var(--ink);border-radius:9px;font-size:14px;transition:.15s;
+  }
+  .send:hover{background:color-mix(in srgb, var(--accent) 24%, transparent);border-color:var(--accent)}
+</style>
+</head>
+<body>
+  <div class="card" id="card">
+    <div class="bar">
+      <div class="orb" id="orb"></div>
+      <div class="state" id="state"><b>AYUS</b></div>
+      <button class="btn mic" id="micBtn" title="Talk (tap to stop / interrupt)">&#127908;</button>
+      <button class="btn" id="capBtn" title="Show AYUS my screen">&#128065;</button>
+      <button class="btn" id="hideBtn" title="Hide (Ctrl+Shift+A)">&#8211;</button>
+    </div>
+
+    <div class="log" id="log"></div>
+
+    <div class="chip" id="chip"><b>screen attached</b><span class="x" id="chipX" title="Remove">&times;</span></div>
+
+    <div class="row">
+      <input id="input" placeholder="Ask AYUS…" autocomplete="off" />
+      <button class="send" id="sendBtn" title="Send">&#8593;</button>
+    </div>
+  </div>
+
+<script type="module" src="/src/overlay.js"></script>
+</body>
+</html>

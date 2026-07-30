@@ -26,11 +26,26 @@ Do not write brief or superficial summaries. Provide a thorough, deep-dive repor
     { role: "user", content: userPrompt }
   ];
 
-  const provider = (process.env.LLM_PROVIDER || "glm").toLowerCase();
   const errors = [];
 
+  // Groq first: a full report is a long generation, and Gemini's free tier
+  // 429s on it for 40-60s at a time — which strands the caller (AYUS goes
+  // silent mid-conversation waiting for Arjun). Gemini stays as last resort.
   try {
-    if (provider === "glm") {
+    if (process.env.GROQ_API_KEY) {
+      try {
+        console.log("[researcher] Trying Groq...");
+        // Default cap is 1200 — a full report gets guillotined mid-sentence and
+        // the truncated text goes straight into whatever email quotes it.
+        const res = await groqChat(messages, [], { maxTokens: 4000 });
+        if (res.content) return res.content;
+      } catch (err) {
+        console.warn("[researcher] Groq research failed:", err.message || err);
+        errors.push(`Groq: ${err.message || err}`);
+      }
+    }
+
+    if (process.env.ZHIPU_API_KEY || process.env.GLM_API_KEY) {
       try {
         console.log("[researcher] Trying Zhipu GLM...");
         const res = await glmChat(messages, []);
@@ -41,19 +56,6 @@ Do not write brief or superficial summaries. Provide a thorough, deep-dive repor
       }
     }
 
-    // Fallback to Groq if GLM failed or if Groq is selected
-    if (process.env.GROQ_API_KEY) {
-      try {
-        console.log("[researcher] Trying Groq...");
-        const res = await groqChat(messages, []);
-        if (res.content) return res.content;
-      } catch (err) {
-        console.warn("[researcher] Groq research failed:", err.message || err);
-        errors.push(`Groq: ${err.message || err}`);
-      }
-    }
-
-    // Final fallback to Gemini
     if (process.env.GEMINI_API_KEY) {
       try {
         console.log("[researcher] Trying Gemini...");
@@ -61,7 +63,9 @@ Do not write brief or superficial summaries. Provide a thorough, deep-dive repor
         const contents = [
           { role: "user", parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }
         ];
-        const data = await geminiGenerate({ contents });
+        // Bounded: better to hand back a failure AYUS can voice than to hold
+        // the conversation open through minutes of 429 backoff.
+        const data = await geminiGenerate({ contents }, { attempts: 2, deadlineMs: 60_000 });
         const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
         if (text) return text;
       } catch (err) {
@@ -72,12 +76,7 @@ Do not write brief or superficial summaries. Provide a thorough, deep-dive repor
 
     throw new Error(`All LLM providers failed to generate research report.`);
   } catch (error) {
-    import("node:fs").then((fs) => {
-      fs.writeFileSync(
-        "C:\\Users\\ASUS\\.gemini\\antigravity-ide\\brain\\5e8a8cf1-2655-4381-993d-b6cd14629862\\research_error.log",
-        `Topic: ${topic}\nTime: ${new Date().toISOString()}\nErrors:\n${errors.join("\n")}\nStack: ${error.stack || error}\n`
-      );
-    }).catch(() => {});
+    console.error(`[researcher] "${topic}" failed:`, errors.join(" | ") || error.message);
     throw error;
   }
 }

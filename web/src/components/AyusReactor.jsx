@@ -17,15 +17,16 @@ import "./AyusReactor.css";
 /*
   AYUS Reactor — a JARVIS-style voice HUD that sits above the Agent Network.
   Reuses the app's voice engine (voice.js) and the real secretary brain
-  (/secretary/chat → Claude). States drive the reactor's color + energy:
+  (/secretary/chat → LLM). States drive the reactor's color + energy:
   STANDBY · LISTENING · THINKING · SPEAKING.
 */
 
+// Flagship palette (matches ayus-universal-hub): gold idle, cyan active, ember thinking.
 const STATE_COLORS = {
-  standby: "#22d3ee",
-  listening: "#34f5c5",
-  thinking: "#f5b830",
-  speaking: "#7cd9ff",
+  standby: "#e8a838",
+  listening: "#2ca5c4",
+  thinking: "#c44b2c",
+  speaking: "#5fc7dd",
 };
 const STATE_SUB = {
   standby: "standing by — tap TALK or type",
@@ -118,6 +119,7 @@ export default function AyusReactor({ variant = "band", onOpenChat }) {
   /* ---------------- mouse parallax ---------------- */
   const pointerRef = useRef({ x: 0, y: 0, tx: 0, ty: 0 });
   useEffect(() => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const onMove = (e) => {
       const p = pointerRef.current;
       p.tx = (e.clientX / window.innerWidth - 0.5) * 2; // -1..1
@@ -134,11 +136,15 @@ export default function AyusReactor({ variant = "band", onOpenChat }) {
     const ctx = cv.getContext("2d");
     let raf;
     const DPR = Math.min(2, window.devicePixelRatio || 1);
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     function size() {
       const r = cv.getBoundingClientRect();
       cv.width = r.width * DPR;
       cv.height = r.height * DPR;
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      // Resizing wipes the bitmap; with reduced motion no loop repaints it,
+      // so schedule one frame to redraw the static orb.
+      if (reduceMotion) raf = requestAnimationFrame(frame);
     }
     size();
     const ro = new ResizeObserver(size);
@@ -188,7 +194,7 @@ export default function AyusReactor({ variant = "band", onOpenChat }) {
       const lvl = readLevel(st);
       const W = cv.clientWidth, H = cv.clientHeight;
       const cx = W / 2, cy = H / 2;
-      const base = Math.min(W, H) * 0.2;
+      const base = Math.min(W, H) * 0.185; /* 0.185: outermost tick ring (*2.66) must stay inside the half-size canvas */
       const spin = now / 1000;
       const tsec = now / 1000;
 
@@ -353,9 +359,11 @@ export default function AyusReactor({ variant = "band", onOpenChat }) {
       ctx.restore();
       ctx.globalAlpha = 1;
 
-      raf = requestAnimationFrame(frame);
+      if (!reduceMotion) raf = requestAnimationFrame(frame);
     }
-    raf = requestAnimationFrame(frame);
+    // Under reduced motion size() already painted the single static frame; the
+    // continuous loop only starts when motion is allowed.
+    if (!reduceMotion) raf = requestAnimationFrame(frame);
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
@@ -472,39 +480,7 @@ export default function AyusReactor({ variant = "band", onOpenChat }) {
     const liveEnabled = getConfig().geminiLiveEnabled;
     console.log("[AyusReactor] Gemini Live Enabled config:", liveEnabled);
 
-    if (liveEnabled) {
-      let textBuffer = "";
-      sessionRef.current = createGeminiLiveSession({
-        onListening: () => {
-          setListening(true);
-          go("listening");
-        },
-        onLevel: (rms) => {
-          micLevelRef.current = rms;
-        },
-        onUserText: (text) => {
-          setLastUser(text);
-        },
-        onText: (text) => {
-          textBuffer += text;
-          setLastReply(textBuffer);
-          go("speaking");
-        },
-        onEnd: () => {
-          setListening(false);
-          micLevelRef.current = 0;
-          sessionRef.current = null;
-          go("standby");
-        },
-        onError: (err) => {
-          setListening(false);
-          micLevelRef.current = 0;
-          sessionRef.current = null;
-          go("standby");
-          setLastReply("Voice chat connection lost or failed to start.");
-        }
-      });
-    } else {
+    const startStandardMic = () => {
       sessionRef.current = createMicSession({
         onListening: () => {
           setListening(true);
@@ -528,7 +504,7 @@ export default function AyusReactor({ variant = "band", onOpenChat }) {
           go("standby");
           setLastReply(
             err === "not-allowed"
-              ? "Allow microphone access so I can hear you, sir."
+              ? "Allow microphone access in your browser to talk to AYUS, sir."
               : err === "transcribe-failed"
                 ? "I didn't catch that — please try again."
                 : "I couldn't open the microphone."
@@ -536,6 +512,43 @@ export default function AyusReactor({ variant = "band", onOpenChat }) {
           if (convoRef.current && err === "transcribe-failed") scheduleReArm(500);
         },
       });
+    };
+
+    if (liveEnabled) {
+      try {
+        sessionRef.current = createGeminiLiveSession({
+          onListening: () => {
+            setListening(true);
+            go("listening");
+          },
+          onLevel: (rms) => {
+            micLevelRef.current = rms;
+          },
+          onUserText: (text) => {
+            setLastUser(text);
+          },
+          onText: (text) => {
+            setLastReply(text);
+            go("speaking");
+          },
+          onEnd: () => {
+            setListening(false);
+            micLevelRef.current = 0;
+            sessionRef.current = null;
+            go("standby");
+          },
+          onError: (err) => {
+            console.warn("[AyusReactor] Gemini Live failed, falling back to standard mic STT:", err);
+            sessionRef.current = null;
+            startStandardMic();
+          },
+        });
+      } catch (err) {
+        console.warn("[AyusReactor] Failed to create Gemini Live session, falling back:", err);
+        startStandardMic();
+      }
+    } else {
+      startStandardMic();
     }
   }
 

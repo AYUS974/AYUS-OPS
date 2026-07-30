@@ -5,6 +5,7 @@ import {
   createRecognizer,
   createMicSession,
   onSpeaking,
+  onBargeIn,
   voiceSupport,
 } from "./voice.js";
 
@@ -249,6 +250,25 @@ export function useAyusVoice({ open, busy, onUtterance, showToast }) {
         st.current.speaking = isSpeaking;
         setSpeaking(isSpeaking);
         if (!isSpeaking) scheduleReArm(); // small gap baked into the timer
+      }),
+    []
+  );
+
+  // Barge-in: user said "AYUS [command]" while AYUS was speaking. The speech is
+  // already stopped (voice.js did that). Enter conversation mode and either run
+  // the command directly or greet and listen.
+  useEffect(
+    () =>
+      onBargeIn((command) => {
+        enterConvo();
+        if (command) {
+          // The user said "AYUS play some music" → run "play some music" now.
+          st.current.onUtterance?.(command);
+        } else {
+          // The user just said "AYUS" → greet, then the speaking-end handler
+          // re-arms the mic for their follow-up.
+          speak("Yes sir?", "ayus");
+        }
       }),
     []
   );

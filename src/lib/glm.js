@@ -2,8 +2,62 @@ const MODEL = process.env.GLM_MODEL || "glm-4-flash";
 const BASE_URL = process.env.GLM_BASE_URL || "https://open.bigmodel.cn/api/paas/v4";
 const URL = `${BASE_URL}/chat/completions`;
 
+// GLM free tier concurrency is strictly limited to 1.
+// All GLM API calls must be paced sequentially to avoid 429/1302 rate limit errors.
+const MIN_GAP_MS = 1500;
+let queue = Promise.resolve();
+let lastStart = 0;
+
+function enqueue(fn) {
+  const next = queue.then(async () => {
+    const wait = lastStart + MIN_GAP_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    lastStart = Date.now();
+    return fn();
+  });
+  queue = next.catch(() => {}); // one failed call must not poison the queue
+  return next;
+}
+
 /**
- * Same contract as claudeJSON / geminiJSON / groqJSON, backed by Zhipu AI (GLM) API.
+ * Recover a TRUNCATED tool-call JSON string. GLM-4-flash sometimes reports
+ * finish_reason "tool_calls" (claiming it's done) but cuts the arguments off
+ * mid-string — JSON.parse then throws "Unterminated string". Walk the text
+ * tracking string/structure depth, close whatever's still open, and re-parse.
+ * Returns the (partial) object, or null if it still can't be parsed. Applies to
+ * every GLM schema: a half-written `output` is still useful context, and a
+ * truncated build keeps the COMPLETE files (the cut-off last one degrades to a
+ * partial the founder can finish in the Monaco editor) instead of failing the
+ * whole mission. Falls through to the normal error if it still won't parse.
+ */
+function repairTruncatedJSON(s) {
+  if (typeof s !== "string" || !s.trim()) return null;
+  let inStr = false, esc = false;
+  const stack = [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "{" || c === "[") stack.push(c);
+    else if (c === "}" || c === "]") stack.pop();
+  }
+  let fixed = s;
+  if (inStr) fixed += '"'; // close the dangling string value
+  fixed = fixed.replace(/,\s*$/, ""); // drop a trailing comma before a missing element
+  for (let i = stack.length - 1; i >= 0; i--) fixed += stack[i] === "{" ? "}" : "]";
+  try {
+    const obj = JSON.parse(fixed);
+    return obj && typeof obj === "object" ? obj : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Same contract as anthropicJSON / geminiJSON / groqJSON, backed by Zhipu AI (GLM) API.
  * Structured output is enforced via forced tool calling.
  *
  * @param {object} opts
@@ -40,24 +94,48 @@ export async function glmJSON({ system, prompt, schema, maxTokens = 1500 }, { at
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const res = await fetch(URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(body),
-      });
+      const res = await enqueue(() =>
+        fetch(URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(body),
+        })
+      );
 
       if (res.ok) {
         const data = await res.json();
-        const call = data.choices?.[0]?.message?.tool_calls?.[0];
+        const choice = data.choices?.[0];
+        const call = choice?.message?.tool_calls?.[0];
         if (!call) {
           throw new Error(
-            `GLM returned no structured output (finish_reason: ${data.choices?.[0]?.finish_reason ?? "unknown"})`
+            `GLM returned no structured output (finish_reason: ${choice?.finish_reason ?? "unknown"})`
           );
         }
-        return JSON.parse(call.function.arguments);
+        // A hit max_tokens cap truncates the tool-call arguments mid-string, so
+        // JSON.parse throws "Unterminated string". Surface that as an actionable
+        // error (raise maxTokens) instead of a cryptic parse crash.
+        try {
+          return JSON.parse(call.function.arguments);
+        } catch (parseErr) {
+          // Salvage a truncated tool call (the common GLM-flash flake) so a
+          // partial-but-usable result degrades gracefully instead of hard-failing.
+          const repaired = repairTruncatedJSON(call.function.arguments);
+          if (repaired) {
+            console.warn(`[glm] recovered truncated JSON (finish_reason: ${choice?.finish_reason ?? "unknown"})`);
+            return repaired;
+          }
+          if (choice?.finish_reason === "length") {
+            throw new Error(
+              "GLM hit the max_tokens cap and returned truncated JSON — raise maxTokens for this call."
+            );
+          }
+          throw new Error(
+            `GLM returned invalid JSON (finish_reason: ${choice?.finish_reason ?? "unknown"}): ${String(parseErr.message)}`
+          );
+        }
       }
 
       const errText = await res.text();
@@ -68,7 +146,7 @@ export async function glmJSON({ system, prompt, schema, maxTokens = 1500 }, { at
     }
 
     const delay = attempt * 2000;
-    console.log(`[glm] Error/429 — retrying in ${Math.round(delay / 1000)}s (attempt ${attempt}/${attempts})`);
+    console.log(`[glm] ${String(lastError?.message || "error").slice(0, 90)} — retrying in ${Math.round(delay / 1000)}s (attempt ${attempt}/${attempts})`);
     await new Promise((r) => setTimeout(r, delay));
   }
   throw lastError;
@@ -92,11 +170,13 @@ export async function glmChat(messages, tools, { maxTokens = 1200, temperature =
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let res;
     try {
-      res = await fetch(URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(body),
-      });
+      res = await enqueue(() =>
+        fetch(URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+          body: JSON.stringify(body),
+        })
+      );
       if (res.ok) {
         const data = await res.json();
         return data.choices?.[0]?.message ?? { content: "" };
@@ -133,11 +213,13 @@ export async function glmChatStream(messages, tools, { onDelta, maxTokens = 1200
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const res = await fetch(URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(body),
-      });
+      const res = await enqueue(() =>
+        fetch(URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+          body: JSON.stringify(body),
+        })
+      );
 
       if (res.ok) {
         let content = "";

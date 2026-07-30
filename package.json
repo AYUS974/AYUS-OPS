@@ -11,6 +11,7 @@
     "start": "node src/index.js",
     "dev": "concurrently -n server,web -c blue,magenta \"node --watch src/index.js\" \"npm run dev --prefix web\"",
     "build": "npm install --prefix web && npm run build --prefix web",
+    "desktop": "npm start --prefix desktop",
     "run-agents": "node -e \"import('./src/orchestrator.js').then(m => m.runAll()).then(r => { console.log(JSON.stringify(r, null, 2)); process.exit(0); })\""
   },
   "dependencies": {

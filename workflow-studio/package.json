@@ -1,0 +1,19 @@
+{
+  "name": "workflow-studio",
+  "version": "1.0.0",
+  "description": "Standalone, portable workflow automation app — trigger + steps, no external services. Lift this folder out and deploy anywhere Node runs.",
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3"
+  }
+}

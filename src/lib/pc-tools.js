@@ -103,6 +103,32 @@ async function runPowerShell(script) {
   await execAsync(`powershell -NoProfile -WindowStyle Hidden -Command "${script}"`, { windowsHide: true });
 }
 
+/**
+ * Grab the whole (virtual) screen to a PNG and return it as base64.
+ * Server runs on the founder's laptop, so this sees his real screen — this is
+ * how AYUS gives itself eyes (read the current song, an error, a page…).
+ * ponytail: full native-res capture of the whole virtual screen; add a
+ * downscale/primary-monitor-only option if image size or cost ever bites.
+ */
+export async function captureScreenBase64() {
+  const out = path.join(os.tmpdir(), `ayus-screen-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+  const outEsc = out.replace(/'/g, "''"); // single-quoted PS string: only ' needs escaping
+  const script =
+    "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;" +
+    "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;" +
+    "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height;" +
+    "$g=[System.Drawing.Graphics]::FromImage($bmp);" +
+    "$g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size);" +
+    `$bmp.Save('${outEsc}',[System.Drawing.Imaging.ImageFormat]::Png);` +
+    "$g.Dispose();$bmp.Dispose()";
+  await runPowerShell(script);
+  try {
+    return (await fs.readFile(out)).toString("base64");
+  } finally {
+    fs.unlink(out).catch(() => {});
+  }
+}
+
 export const PC_TOOL_DECLARATIONS = [
   {
     name: "open_app",

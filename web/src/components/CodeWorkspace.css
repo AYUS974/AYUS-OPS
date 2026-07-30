@@ -1,0 +1,130 @@
+/* CodeWorkspace — in-browser IDE for a mission's code deliverable. */
+
+.cw {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0d1117;
+  height: clamp(420px, calc(100dvh - 280px), 900px);
+}
+
+.cw-empty {
+  padding: 24px;
+  color: #8b949e;
+  font-size: 14px;
+}
+
+/* ---------- Toolbar ---------- */
+.cw-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  background: #161b22;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex-wrap: wrap;
+}
+
+.cw-views {
+  display: inline-flex;
+  background: #0d1117;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.cw-vbtn {
+  border: 0;
+  background: transparent;
+  color: #8b949e;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.cw-vbtn:hover { color: #e6edf3; }
+.cw-vbtn.on { background: #1f6feb; color: #fff; }
+
+.cw-actions { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+
+.cw-abtn {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #21262d;
+  color: #c9d1d9;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 11px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.cw-abtn:hover { background: #30363d; border-color: rgba(255, 255, 255, 0.2); }
+.cw-abtn:disabled { opacity: 0.5; cursor: default; }
+.cw-abtn.primary { background: #238636; border-color: #2ea043; color: #fff; }
+.cw-abtn.primary:hover:not(:disabled) { background: #2ea043; }
+
+/* ---------- Body layout ---------- */
+.cw-body { flex: 1; display: flex; min-height: 0; }
+.cw-body.view-split > .cw-tree,
+.cw-body.view-code > .cw-tree { flex: 0 0 180px; }
+.cw-body.view-split .cw-editor,
+.cw-body.view-split .cw-preview { flex: 1 1 50%; min-width: 0; }
+.cw-body.view-code .cw-editor { flex: 1; }
+.cw-body.view-preview .cw-preview { flex: 1; }
+
+/* ---------- File tree ---------- */
+.cw-tree {
+  background: #0d1117;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.cw-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: #8b949e;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: "SF Mono", "Cascadia Code", Consolas, monospace;
+}
+.cw-file:hover { background: rgba(255, 255, 255, 0.04); color: #c9d1d9; }
+.cw-file.active { background: rgba(31, 111, 235, 0.18); color: #e6edf3; }
+
+.cw-file-icon {
+  flex: 0 0 auto;
+  width: 16px;
+  text-align: center;
+  color: #58a6ff;
+  font-size: 11px;
+}
+.cw-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- Editor + preview ---------- */
+.cw-editor { min-width: 0; background: #1e1e1e; }
+.cw-loading { color: #8b949e; padding: 20px; font-size: 13px; }
+
+.cw-preview {
+  min-width: 0;
+  background: #fff;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+}
+.cw-iframe { flex: 1; width: 100%; height: 100%; border: 0; background: #fff; }
+
+@media (max-width: 720px) {
+  .cw-body.view-split { flex-direction: column; }
+  .cw-body.view-split .cw-tree { flex: 0 0 auto; max-height: 120px; }
+}

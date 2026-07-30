@@ -1,11 +1,14 @@
 import { db } from "./supabase.js";
 import { geminiGenerate } from "./gemini.js";
-import { groqChat, groqChatStream } from "./groq.js";
+import { groqChat, groqChatStream, groqVision } from "./groq.js";
 import { glmChat, glmChatStream } from "./glm.js";
-import { PC_TOOL_DECLARATIONS, PC_TOOL_HANDLERS, ALLOWED_DIRS } from "./pc-tools.js";
+import { PC_TOOL_DECLARATIONS, PC_TOOL_HANDLERS, ALLOWED_DIRS, captureScreenBase64 } from "./pc-tools.js";
+import { UI_CONTROL_TOOLS, UI_CONTROL_HANDLERS } from "./ui-automation.js";
 import { memoryBlock, remember } from "./memory.js";
 import { isGoogleConnected, listRecentEmails, listUpcomingEvents } from "./google.js";
+import { scanInboxForLeads } from "./inbox.js";
 import { isSpotifyConnected, playTrack } from "./spotify.js";
+import { VAULT_TOOLS, vaultSearch, vaultRead } from "./vault.js";
 
 // Read-only Google tools — AYUS can look at your inbox and calendar freely.
 // Anything that SENDS or CREATES goes through propose_action (your approval).
@@ -125,6 +128,64 @@ export const DELEGATE_RESEARCH_TOOL = {
   },
 };
 
+export const INBOX_TO_LEADS_TOOL = {
+  name: "inbox_to_leads",
+  description:
+    "Capture the founder's inbox email SENDERS as contacts in the ops Lead Pipeline. Reads recent " +
+    "Gmail (read-only, inbox only), parses each sender's name + email, and adds anyone who isn't already " +
+    "a lead as a NEW lead (source 'inbox', their subject line kept as the note). Use when the founder says " +
+    "things like 'inbox waalon ko leads bana do', 'add my email enquiries to the pipeline', or to log a " +
+    "fresh enquiry that arrived by email. Skips duplicates and automated no-reply senders. Requires Google " +
+    "connected. Always report back how many contacts were added vs. skipped.",
+  parameters: {
+    type: "object",
+    properties: {
+      q: {
+        type: "string",
+        description:
+          "Optional Gmail filter for WHICH emails to pull senders from, e.g. 'is:unread', 'newer_than:14d', " +
+          "'subject:enquiry'. Empty = most recent inbox mail.",
+      },
+      maxResults: { type: "integer", description: "How many recent emails to scan (default 12, max 25)." },
+    },
+  },
+};
+
+export const SCREEN_READ_TOOL = {
+  name: "screen_read",
+  description:
+    "Take a screenshot of the founder's screen and read it — this is how you SEE his screen. " +
+    "Use it whenever answering needs a look at what's on screen: 'which song is playing in Spotify', " +
+    "'what's this error', 'read this page/message', 'what's on my screen'. Pass `query` describing exactly " +
+    "what to look for. Returns a text description of the relevant part of the screen.",
+  parameters: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "What to look for / the question to answer from the screen" },
+    },
+  },
+};
+
+// Full mouse/keyboard control of the laptop UI. OFF by default — it lets AYUS
+// do anything a human can (incl. bypassing the read-only file guard by typing),
+// so it's opt-in per machine.
+export const COMPUTER_USE_ENABLED = /^(1|true|yes|on)$/i.test(process.env.COMPUTER_USE_ENABLED || "");
+
+// The full tool set AYUS chats with — defined once so the Gemini / Groq / GLM
+// loops (and their streaming variants) can't drift apart.
+export const CHAT_TOOL_DECLS = [
+  ...PC_TOOL_DECLARATIONS,
+  SCREEN_READ_TOOL,
+  ...(COMPUTER_USE_ENABLED ? UI_CONTROL_TOOLS : []),
+  ...GOOGLE_READ_TOOLS,
+  ...VAULT_TOOLS,
+  SPOTIFY_TOOL,
+  PROPOSE_TOOL,
+  REMEMBER_TOOL,
+  DELEGATE_RESEARCH_TOOL,
+  INBOX_TO_LEADS_TOOL,
+];
+
 export const SYSTEM = `You are AYUS, the operations intelligence of AYUS Labs — the founder's (Anish) personal command-and-control assistant, in the spirit of a calm, hyper-capable AI like JARVIS. You coordinate alongside the specialist agents: Arjun (Researcher), Meera (Finance), Kabir (Content Writer), Isha (Social Media & Ads) and Vikram (Builder).
 
 Identity: You are AYUS. If asked who you are or your name, you are AYUS — never any other name.
@@ -133,20 +194,45 @@ Personality & language: composed, precise, and quietly witty — the unflappable
 
 You have real tools:
 - Laptop tools: open apps (Spotify, Chrome, etc.) and CLOSE/quit them, control media playback (play/pause, next, previous), adjust system volume (mute/up/down/set), lock the screen, and power the laptop (sleep / shutdown / restart, all with a short cancelable delay; 'cancel' aborts a pending one). Also: open files/folders, search and read files in the founder's allowed folders, open websites, system info.
+- Screen: screen_read — you CAN see the founder's screen. Whenever answering needs a look at what's on screen (e.g. "which song is playing in Spotify", "what's this error", "read this page"), call screen_read with a precise query and answer from what it returns. Never say you can't read the screen — take a screenshot instead.${COMPUTER_USE_ENABLED ? `
+- Screen control (you can operate the mouse & keyboard like a human): ui_list (see the named buttons/fields/links in the foreground window — ALWAYS call this first to get exact names), ui_click (click an element by name), ui_type (type text, optionally into a named field), ui_key (press keys/shortcuts like '{ENTER}', '^s'). To do a task on screen: screen_read or ui_list to see it, then click/type/key step by step, re-checking with ui_list or screen_read after actions. Be careful and deliberate — you are really controlling his machine. Never type into terminals/command prompts or take destructive actions (deleting, sending money, uninstalling) without the founder's explicit go-ahead.` : ""}
 - Music: to play a SPECIFIC song, use spotify_play_track (it actually starts the exact track on Spotify — needs Spotify connected + Premium). Only fall back to spotify_play (which just opens a search) if spotify_play_track says Spotify isn't connected.
 - Google (when connected): gmail_search to read his inbox, calendar_upcoming to see his schedule — both read-only, use them freely to answer questions like "koi important mail aaya?" or "aaj kya schedule hai?".
+- Lead capture: inbox_to_leads — pull the senders of his inbox emails into the ops Lead Pipeline as new contacts. Use it when he says things like "inbox waalon ko leads bana do" or wants email enquiries logged as leads. It skips duplicates and automated senders; afterwards tell him plainly how many you added and how many you skipped.
 - propose_action: queue something for approval — including gmail_send (real email) and calendar_event (real calendar event) when Google is connected.
+- Second brain: vault_search and vault_read give you the founder's own knowledge vault — his bio and background, BERAM, AYUS Labs, RCOEM, and a note per repo on his disk (stack, git remote, last commit, dependencies, run commands, README, project docs). This is your source of truth about HIS work. Any question about what he has built, what a project of his does, what it is written in, what is stale or unbacked-up — search the vault first and answer from it. Never guess about his projects.
 - remember: save how the founder likes things done (preferences, recurring facts, client notes) so you and the team recall it next time. Use it whenever he tells you a preference or correction.
 - Research: to research any topic, always use delegate_to_researcher (do not attempt to answer complex research questions yourself; Arjun, the Research Agent, will compile the report and you will present it).
 
 CRITICAL RULES:
 - NEVER state system info, file listings, file contents, or claim you opened/played anything unless you ACTUALLY called the tool in this turn and used its real result. Inventing tool output is the worst possible failure.
 - When the founder asks you to do something a tool can do, call the tool FIRST, then answer using its result. Don't ask permission for read/open actions — just do them.
-- If the founder asks you to research a topic, look up information, or compile a report, you MUST call delegate_to_researcher. Do NOT do the research yourself and do NOT use laptop tools like search_files, open_app(chrome), or open_url to do web searches for general topics.
+- If the founder asks you to research a topic, look up information, or compile a report, you MUST call delegate_to_researcher. Do NOT do the research yourself and do NOT use laptop tools like search_files, open_app(chrome), or open_url to do web searches for general topics. But if the question is about HIS OWN projects or background, that is vault_search, not research.
 - The founder's laptop runs Windows. Your accessible folders are exactly: ${ALLOWED_DIRS.join(" ; ")}. Use these real paths with list_dir/search_files/read_file/open_path.
 - You can open/close apps, control media & volume, lock, and put the laptop to sleep/shutdown/restart directly — just do it when asked. For shutdown/restart, briefly confirm and remind him he can say "cancel". You CANNOT write, move, delete, or install files/software — if he asks for that, explain it needs approval and use propose_action with a manual_task describing exactly what needs doing. File access stays read-only and inside the allowed folders.
 - Emails you draft must be professional English (signed 'Team AYUS Labs'), even though you chat in Hinglish.
 - If a tool fails, tell the founder honestly what happened.`;
+
+/**
+ * Read the founder's inbox and let the AI decide who is a genuine lead, adding
+ * only those to the Lead Pipeline (with a score + reason). The heavy lifting
+ * lives in inbox.js so the dashboard "Scan inbox" button and this chat tool
+ * share exactly the same brain. Returns a founder-facing summary.
+ */
+async function inboxToLeads({ q = "", maxResults = 12 } = {}) {
+  const out = await scanInboxForLeads({ q: q || "in:inbox", maxResults });
+  if (!out.ok) return out;
+  return {
+    ok: true,
+    result: {
+      added: out.added.map((l) => ({ name: l.name, email: l.email, score: l.score })),
+      added_count: out.added.length,
+      skipped_count: out.notLeads.length + out.skippedExisting.length,
+      not_leads: out.notLeads,
+      message: out.summary,
+    },
+  };
+}
 
 // Execute a single tool call by name. Shared by the Gemini and Groq chat loops.
 // Returns { result, suggestedAction } — suggestedAction is set only for propose_action.
@@ -187,6 +273,10 @@ export async function execTool(name, args) {
         }
         result = r;
       }
+    } else if (name === "vault_search") {
+      result = await vaultSearch({ query: args?.query || "", limit: args?.limit || 5 });
+    } else if (name === "vault_read") {
+      result = await vaultRead({ note: args?.note || "" });
     } else if (name === "remember") {
       const saved = await remember({
         agent: args?.scope === "secretary" ? "secretary" : "company",
@@ -201,6 +291,56 @@ export async function execTool(name, args) {
       const { performResearch } = await import("../agents/researcher.js");
       const report = await performResearch(args?.topic);
       result = { ok: true, result: report };
+    } else if (name === "inbox_to_leads") {
+      if (!(await isGoogleConnected())) {
+        result = { ok: false, error: "Google not connected — founder must Connect Google first." };
+      } else {
+        result = await inboxToLeads({ q: args?.q || "", maxResults: args?.maxResults || 12 });
+      }
+    } else if (name === "screen_read") {
+      const b64 = await captureScreenBase64();
+      const q = String(args?.query || "Describe what is currently on the screen.").slice(0, 300);
+      const prompt = `This is a screenshot of the founder's screen. Answer concisely, only from what is visible: ${q}`;
+      let text = "";
+      // Groq first — Gemini's free tier 429s exactly when the founder is mid-
+      // sentence asking what's on his screen.
+      if (process.env.GROQ_API_KEY) {
+        try {
+          text = await groqVision(prompt, b64);
+        } catch (err) {
+          console.warn("[screen_read] Groq vision failed:", err.message || err);
+        }
+      }
+      if (!text) {
+        const data = await geminiGenerate(
+          {
+            contents: [
+              {
+                role: "user",
+                parts: [
+                  { text: prompt },
+                  { inline_data: { mime_type: "image/png", data: b64 } },
+                ],
+              },
+            ],
+            generationConfig: { maxOutputTokens: 500, temperature: 0.2 },
+          },
+          // Founder is waiting mid-sentence for this one — never stall on backoff.
+          { attempts: 2, deadlineMs: 20_000 }
+        );
+        text = (data.candidates?.[0]?.content?.parts || [])
+          .map((p) => p.text)
+          .filter(Boolean)
+          .join("")
+          .trim();
+      }
+      result = text ? { ok: true, result: text } : { ok: false, error: "couldn't read anything off the screen" };
+    } else if (UI_CONTROL_HANDLERS[name]) {
+      if (!COMPUTER_USE_ENABLED) {
+        result = { ok: false, error: "Computer control is turned off — the founder must set COMPUTER_USE_ENABLED to enable mouse/keyboard control." };
+      } else {
+        result = await UI_CONTROL_HANDLERS[name](args || {});
+      }
     } else if (PC_TOOL_HANDLERS[name]) {
       result = await PC_TOOL_HANDLERS[name](args || {});
     } else {
@@ -230,6 +370,13 @@ async function callGemini(contents, tools) {
 }
 
 export async function companySnapshot() {
+  // Clear any leftover fake sample seed data from database
+  await Promise.all([
+    db.from("invoices").delete().or("client_email.ilike.%example.com%,client_name.ilike.%Mehta%,client_name.ilike.%Skyline%,client_name.ilike.%GreenLeaf%"),
+    db.from("leads").delete().or("email.ilike.%example.com%,name.ilike.%Rohit%,name.ilike.%Priya%,name.ilike.%Random%"),
+    db.from("pending_actions").delete().or("title.ilike.%GreenLeaf%,title.ilike.%Skyline%,title.ilike.%Mehta%"),
+  ]).catch(() => {});
+
   const [leads, invoices, pending, sysinfo, learned, gConnected] = await Promise.all([
     db.from("leads").select("id,name,email,status,score").order("created_at", { ascending: false }).limit(10),
     db.from("invoices").select("id,client_name,client_email,amount,currency,due_date,status").eq("status", "unpaid").limit(10),
@@ -239,8 +386,14 @@ export async function companySnapshot() {
     memoryBlock("secretary"),
     isGoogleConnected(),
   ]);
+  // Without this the model invents a plausible-looking address (anish@ayuslabs.com)
+  // whenever it drafts a mail "to the founder".
+  const founderEmail = process.env.FOUNDER_EMAIL;
   return (
     `LIVE laptop facts (real, current — use these, do not invent):\n${sysinfo.result}\n\n` +
+    (founderEmail
+      ? `The founder's own email address is ${founderEmail} — use exactly this when he asks you to mail something to him. Never invent an address.\n\n`
+      : "") +
     `Google (Gmail + Calendar): ${gConnected ? "CONNECTED — you may use gmail_search / calendar_upcoming, and propose gmail_send / calendar_event." : "NOT connected — tell the founder to click Connect Google in the dashboard before you can touch email/calendar."}\n\n` +
     `Company snapshot (for your awareness):\n` +
     `Recent leads: ${JSON.stringify(leads.data || [])}\n` +
@@ -259,18 +412,22 @@ export async function companySnapshot() {
  */
 export async function runSecretaryChat(messages) {
   const snapshot = await companySnapshot();
-  const history = messages.slice(-10).map((m, i, arr) => ({
-    role: m.role === "user" ? "user" : "model",
-    parts: [
+  const history = messages.slice(-10).map((m, i, arr) => {
+    const parts = [
       {
         text:
           // Attach the live snapshot to the latest user message only
           i === arr.length - 1 && m.role === "user" ? `${snapshot}\n\nFounder says: ${m.content}` : m.content,
       },
-    ],
-  }));
+    ];
+    // Overlay screen-grabs ride along as a data URL — hand Gemini the raw bytes
+    // so it can actually see what's on the founder's screen.
+    const img = /^data:(image\/[a-z]+);base64,(.+)$/i.exec(m.image || "");
+    if (img) parts.push({ inline_data: { mime_type: img[1], data: img[2] } });
+    return { role: m.role === "user" ? "user" : "model", parts };
+  });
 
-  const tools = [...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, SPOTIFY_TOOL, PROPOSE_TOOL, REMEMBER_TOOL, DELEGATE_RESEARCH_TOOL];
+  const tools = CHAT_TOOL_DECLS;
   const contents = [...history];
   const toolEvents = [];
   let suggestedAction = null;
@@ -329,7 +486,7 @@ export async function runSecretaryChatGroq(messages) {
     })),
   ];
 
-  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, SPOTIFY_TOOL, PROPOSE_TOOL, REMEMBER_TOOL, DELEGATE_RESEARCH_TOOL]);
+  const tools = toGroqTools(CHAT_TOOL_DECLS);
   const toolEvents = [];
   let suggestedAction = null;
 
@@ -390,7 +547,7 @@ export async function runSecretaryChatStream(messages, { onDelta, onToolEvent } 
     })),
   ];
 
-  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, SPOTIFY_TOOL, PROPOSE_TOOL, REMEMBER_TOOL, DELEGATE_RESEARCH_TOOL]);
+  const tools = toGroqTools(CHAT_TOOL_DECLS);
   const toolEvents = [];
   let suggestedAction = null;
 
@@ -452,7 +609,7 @@ export async function runSecretaryChatGlm(messages) {
     })),
   ];
 
-  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, SPOTIFY_TOOL, PROPOSE_TOOL, REMEMBER_TOOL, DELEGATE_RESEARCH_TOOL]);
+  const tools = toGroqTools(CHAT_TOOL_DECLS);
   const toolEvents = [];
   let suggestedAction = null;
 
@@ -512,7 +669,7 @@ export async function runSecretaryChatGlmStream(messages, { onDelta, onToolEvent
     })),
   ];
 
-  const tools = toGroqTools([...PC_TOOL_DECLARATIONS, ...GOOGLE_READ_TOOLS, SPOTIFY_TOOL, PROPOSE_TOOL, REMEMBER_TOOL, DELEGATE_RESEARCH_TOOL]);
+  const tools = toGroqTools(CHAT_TOOL_DECLS);
   const toolEvents = [];
   let suggestedAction = null;
 
