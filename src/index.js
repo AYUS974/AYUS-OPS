@@ -24,7 +24,9 @@ import {
   SPOTIFY_TOOL,
   execTool,
   companySnapshot,
+  toolEventLine,
 } from "./lib/secretaryAgent.js";
+import { logTurn } from "./lib/transcript.js";
 import { PC_TOOL_DECLARATIONS } from "./lib/pc-tools.js";
 import { learnFromDecision } from "./lib/memory.js";
 import { dispatchHandoffs } from "./lib/handoffs.js";
@@ -44,6 +46,7 @@ import { edgeTTS } from "./lib/edge-tts.js";
 import { getVaultGraph, getVaultNote, getDocsCatalog, getDocBody, searchDocs } from "./lib/vault.js";
 import { initWhatsAppBot, getWhatsAppStatus, sendWhatsAppMessage, closeWhatsAppBot } from "./lib/whatsapp.js";
 import { listContacts, saveContact, deleteContact, findContact } from "./lib/contacts.js";
+import { listNotes, saveNote, deleteNote, listProjects } from "./lib/notes.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -804,6 +807,35 @@ api.delete("/contacts/:id", async (req, res) => {
   }
 });
 
+// ---------- Notes (project working memory; AYUS writes here too) ----------
+api.get("/notes", async (req, res) => {
+  try {
+    const [notes, projects] = await Promise.all([
+      listNotes({ project: String(req.query.project || ""), q: String(req.query.q || "") }),
+      listProjects(),
+    ]);
+    res.json({ notes, projects });
+  } catch (err) {
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+api.post("/notes", async (req, res) => {
+  try {
+    res.json({ note: await saveNote(req.body || {}) });
+  } catch (err) {
+    res.status(400).json({ error: String(err.message || err) });
+  }
+});
+
+api.delete("/notes/:id", async (req, res) => {
+  try {
+    res.json(await deleteNote(req.params.id));
+  } catch (err) {
+    res.status(404).json({ error: String(err.message || err) });
+  }
+});
+
 app.use("/api", api);
 
 // ---------- Frontend (built React app) ----------
@@ -851,6 +883,13 @@ wss.on("connection", async (ws, request) => {
   console.log("[ws] Client connected to live audio socket");
   
   const inFlight = new Set(); // NON_BLOCKING tools currently running for this socket
+  let lastUser = ""; // founder's latest spoken turn, from Live input transcription
+  let userTurnDone = false;
+  // Live has no request/response to wrap, so the turn is assembled from the two
+  // transcription streams and filed when Gemini says the turn is complete —
+  // otherwise everything said by voice is forgotten the moment the socket closes.
+  let lastReply = "";
+  let liveTools = [];
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -950,6 +989,26 @@ wss.on("connection", async (ws, request) => {
       try {
         const msg = JSON.parse(data.toString());
         
+        // Live audio has no message array, so keep the last thing the founder
+        // actually said — whatsapp_send refuses to fire without it.
+        const heard = msg.serverContent?.inputTranscription?.text;
+        if (heard) {
+          if (userTurnDone) { lastUser = ""; userTurnDone = false; } // new turn, drop the old ask
+          lastUser = (lastUser + heard).slice(-500);
+        }
+        const spoken = msg.serverContent?.outputTranscription?.text;
+        if (spoken) lastReply = (lastReply + spoken).slice(-2000);
+        if (msg.serverContent?.turnComplete) {
+          userTurnDone = true;
+          // Only when AYUS actually said something — a bare turnComplete would
+          // otherwise re-file the previous question against an empty answer.
+          if (lastReply.trim()) {
+            logTurn({ surface: "voice", user: lastUser, reply: lastReply, tools: liveTools });
+          }
+          lastReply = "";
+          liveTools = [];
+        }
+
         // Handle tool call if requested by Gemini
         if (msg.toolCall) {
           const calls = msg.toolCall.functionCalls || [];
@@ -971,10 +1030,11 @@ wss.on("connection", async (ws, request) => {
             }
             if (NON_BLOCKING_TOOLS.has(name)) inFlight.add(name);
 
-            execTool(name, args).then(async ({ result, suggestedAction }) => {
+            execTool(name, args, { lastUser }).then(async ({ result, suggestedAction }) => {
               // execTool queues proposals itself now — this path only logs them.
               if (suggestedAction) console.log(`[ws] queued proposal: ${suggestedAction.title}`);
               console.log(`[ws] Tool execution result:`, result);
+              liveTools.push(toolEventLine(name, args, result));
               reply(result);
             }).catch(err => {
               console.error(`[ws] Tool execution failed:`, err);

@@ -6,6 +6,7 @@ import AyusReactor from "./AyusReactor.jsx";
 import MissionControl from "./MissionControl.jsx";
 import LeadPipeline from "./LeadPipeline.jsx";
 import Contacts from "./Contacts.jsx";
+import Notes from "./Notes.jsx";
 import Workflows from "./Workflows.jsx";
 import KnowledgeVault from "./KnowledgeVault.jsx";
 import Docs from "./Docs.jsx";
@@ -52,6 +53,7 @@ const NAV_ITEMS = [
   { id: "insights",  icon: "◴", label: "Insights" },
   { id: "leads",     icon: "◇", label: "Lead Pipeline" },
   { id: "contacts",  icon: "☏", label: "Contacts" },
+  { id: "notes",     icon: "✎", label: "Notes" },
   { id: "content",   icon: "✎", label: "Content" },
   { id: "vault",     icon: "◫", label: "Knowledge Vault" },
   { id: "docs",      icon: "▤", label: "Documentation" },
@@ -1467,6 +1469,9 @@ export default function Dashboard({ session }) {
 
           {/* Contacts — the name → number book AYUS sends WhatsApp from */}
           {tab === "contacts" && <Contacts showToast={showToast} />}
+
+          {/* Notes — project working memory; AYUS and Arjun write into it */}
+          {tab === "notes" && <Notes showToast={showToast} />}
 
           {/* Knowledge Vault — ANISH second brain 2D force graph + note inspector */}
           {tab === "vault" && <KnowledgeVault showToast={showToast} />}

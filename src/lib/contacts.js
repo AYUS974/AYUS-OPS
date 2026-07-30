@@ -42,6 +42,12 @@ export function normalizePhone(raw) {
   return digits.length === 10 ? cc + digits : digits;
 }
 
+/** The founder's own WhatsApp number — who "mujhe bhej do" means, and the one
+ * number whose messages reach the real brain instead of the receptionist. */
+export function founderPhone() {
+  return normalizePhone(process.env.FOUNDER_NUMBER || "");
+}
+
 export async function listContacts() {
   const list = await readAll();
   return list.sort((a, b) => String(a.name).localeCompare(String(b.name)));
@@ -82,9 +88,19 @@ export async function deleteContact(id) {
  * wins, then prefix, then substring — and an ambiguous query returns the
  * candidates instead of guessing, because guessing here texts the wrong person.
  */
+// "mujhe bhej do" / "send it to me" — the founder means his own number, and it
+// is never in the contact book under whatever word he happened to use.
+const SELF = /^(me|mujhe|mujhko|mereko|my ?self|self|khud|founder|sir|boss|anish)$/i;
+
 export async function findContact(query) {
   const q = String(query || "").trim().toLowerCase();
   if (!q) return { ok: false, error: "no name given" };
+
+  if (SELF.test(q)) {
+    const phone = founderPhone();
+    if (phone) return { ok: true, contact: { name: "you", phone } };
+    return { ok: false, error: "FOUNDER_NUMBER is not set in .env, so I don't know your own number" };
+  }
 
   const list = await listContacts();
   if (!list.length) return { ok: false, error: "the contact book is empty — add contacts in the Contacts tab first" };

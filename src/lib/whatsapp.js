@@ -10,6 +10,8 @@ import pino from "pino";
 import qrcode from "qrcode-terminal";
 import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
 import { runSecretaryChat } from "./secretaryAgent.js";
+import { founderPhone } from "./contacts.js";
+import { llmJSON } from "./llm.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_DIR = path.join(__dirname, "..", "..", "auth_info_baileys");
@@ -23,20 +25,39 @@ const status = { enabled: false, connected: false, qr: null, me: null };
 const histories = new Map(); // jid -> [{role, content}]
 const replying = new Set(); // jids with a reply in flight
 
-// runSecretaryChat can close apps, lock the laptop and read files. Anyone who
-// knows the number could otherwise drive all of that by text, so the bot answers
-// ONLY numbers listed in WHATSAPP_ALLOWED_NUMBERS (comma-separated, digits only,
-// country code included). Unset = the bot connects but answers nobody.
-function allowedNumbers() {
-  return String(process.env.WHATSAPP_ALLOWED_NUMBERS || "")
-    .split(",")
-    .map((n) => n.replace(/\D/g, ""))
-    .filter(Boolean);
+// Everyone who messages AYUS gets a reply. Only the founder's own number gets
+// the real brain, though — runSecretaryChat can close apps, lock the laptop,
+// read files and WhatsApp people as him, and a stranger must not drive that by
+// text. Everyone else lands on publicReply below.
+//
+// founderPhone() normalizes: the .env held a 10-digit number while WhatsApp jids
+// carry the country code, so the old comparison matched nobody and the bot
+// silently answered no one at all — including the founder.
+function isFounder(jid) {
+  const num = jid.split("@")[0].split(":")[0].replace(/\D/g, "");
+  const mine = founderPhone();
+  return Boolean(mine) && num === mine;
 }
 
-function isAllowed(jid) {
-  const num = jid.split("@")[0].split(":")[0].replace(/\D/g, "");
-  return allowedNumbers().includes(num);
+// Strangers get a receptionist with no tools and no company data — a polite
+// front desk, not the command console.
+async function publicReply(history) {
+  const out = await llmJSON({
+    system:
+      "You are AYUS, the AI assistant of AYUS Labs, replying on WhatsApp to someone who is NOT the founder " +
+      "(Anish). Be warm, brief (1-3 sentences) and professional; mirror their language, Hinglish included. " +
+      "You can talk about AYUS Labs in general terms and take a message for Anish. You CANNOT do anything " +
+      "else — no laptop control, no files, no sending messages to other people, no internal or financial " +
+      "details. If asked for those, say Anish will get back to them. Never claim to have done a task.",
+    prompt: history.map((m) => `${m.role === "user" ? "Them" : "You"}: ${m.content}`).join("\n"),
+    schema: {
+      type: "object",
+      properties: { reply: { type: "string", description: "The WhatsApp reply to send" } },
+      required: ["reply"],
+    },
+    maxTokens: 300,
+  });
+  return String(out?.reply || "").trim() || "Thanks for the message — I've noted it for Anish, he'll get back to you.";
 }
 
 function textOf(msg) {
@@ -53,10 +74,7 @@ async function handleMessage(msg) {
   const text = textOf(msg).trim();
   if (!text) return;
 
-  if (!isAllowed(jid)) {
-    console.warn(`[whatsapp] ignored message from ${jid} — add its number to WHATSAPP_ALLOWED_NUMBERS to let it through`);
-    return;
-  }
+  const trusted = isFounder(jid);
   // Without this a slow reply lets the next message start a second brain run for
   // the same chat, and both answer.
   if (replying.has(jid)) return;
@@ -67,12 +85,14 @@ async function handleMessage(msg) {
     const history = histories.get(jid) || [];
     history.push({ role: "user", content: text });
 
-    const { message } = await runSecretaryChat(history.slice(-10));
+    const message = trusted
+      ? (await runSecretaryChat(history.slice(-10), { surface: "whatsapp" })).message
+      : await publicReply(history.slice(-6));
     history.push({ role: "assistant", content: message });
     histories.set(jid, history.slice(-10));
 
     await sock.sendMessage(jid, { text: message });
-    console.log(`[whatsapp] replied to ${jid}`);
+    console.log(`[whatsapp] replied to ${jid}${trusted ? "" : " (public mode)"}`);
   } catch (err) {
     console.error("[whatsapp] reply failed:", err?.message || err);
     try {
@@ -116,8 +136,8 @@ export async function initWhatsAppBot() {
       console.log("========================================================");
       console.log("[whatsapp] ✅ AYUS WhatsApp Bot connected successfully!");
       console.log("========================================================");
-      if (!allowedNumbers().length) {
-        console.warn("[whatsapp] WHATSAPP_ALLOWED_NUMBERS is empty — the bot will not answer anyone. Set it in .env (e.g. 919876543210).");
+      if (!founderPhone()) {
+        console.warn("[whatsapp] FOUNDER_NUMBER is not set — everyone, including you, gets the tool-less receptionist. Put your number in .env (e.g. 919876543210) to reach the real brain.");
       }
     }
     if (connection === "close") {
@@ -139,7 +159,7 @@ export async function initWhatsAppBot() {
 }
 
 export function getWhatsAppStatus() {
-  return { ...status, allowed: allowedNumbers().length };
+  return { ...status, founder: founderPhone() || null };
 }
 
 export async function sendWhatsAppMessage(to, text) {

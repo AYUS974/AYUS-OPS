@@ -9,6 +9,7 @@ import { isGoogleConnected, listRecentEmails, listUpcomingEvents } from "./googl
 import { scanInboxForLeads } from "./inbox.js";
 import { isSpotifyConnected, playTrack } from "./spotify.js";
 import { VAULT_TOOLS, vaultSearch, vaultRead } from "./vault.js";
+import { logTurn, conversationBlock } from "./transcript.js";
 
 // Read-only Google tools — AYUS can look at your inbox and calendar freely.
 // Anything that SENDS or CREATES goes through propose_action (your approval).
@@ -169,22 +170,64 @@ export const SCREEN_READ_TOOL = {
 export const WHATSAPP_SEND_TOOL = {
   name: "whatsapp_send",
   description:
-    "Send a WhatsApp message from the founder's own WhatsApp. Use whenever he says things like " +
-    "'Rahul ko message bhej do', 'WhatsApp mummy that I'll be late', 'text Priya the address'. " +
-    "Pass `name` and it is looked up in his contact book (Contacts tab) — only pass `phone` when he " +
-    "dictates a raw number. If the lookup comes back ambiguous or empty, ASK him which contact instead " +
-    "of guessing: a wrong match texts the wrong person. Write `message` in the founder's own voice, in " +
-    "the language he used. Requires the WhatsApp bot to be connected.",
+    "Send a WhatsApp message from the founder's own WhatsApp. ONLY when he asked for it in this very " +
+    "turn — 'Rahul ko message bhej do', 'WhatsApp mummy that I'll be late', 'text Priya the address'. " +
+    "NEVER on your own initiative, never to 'follow up' or 'be helpful': it goes out from his real " +
+    "number to a real person. Pass `name` and it is looked up in his contact book (Contacts tab) — " +
+    "only pass `phone` when he dictated those exact digits himself. Never invent a number. If the " +
+    "lookup comes back ambiguous or empty, ASK him which contact instead of guessing: a wrong match " +
+    "texts the wrong person. Write `message` in the founder's own voice, in the language he used. " +
+    "Requires the WhatsApp bot to be connected.",
   parameters: {
     type: "object",
     properties: {
-      name: { type: "string", description: "Contact name as the founder said it, e.g. 'Rahul'" },
+      name: { type: "string", description: "Contact name as the founder said it, e.g. 'Rahul'. Use 'me' when he wants it on his own number ('mujhe bhej do')." },
       phone: { type: "string", description: "Raw phone number with country code — only when there is no contact" },
       message: { type: "string", description: "The exact text to send" },
     },
     required: ["message"],
   },
 };
+
+export const NOTE_TOOLS = [
+  {
+    name: "note_save",
+    description:
+      "Write something into the founder's Notes — his working memory for whatever he is building. Use it " +
+      "whenever he says 'note kar lo', 'ye likh lo', 'save this', dictates a decision/idea/bug/link, or when " +
+      "YOU find something worth keeping while working on one of his projects (research findings, API keys' " +
+      "locations — never the keys themselves, steps that worked, what broke). Always set `project` to the " +
+      "thing he is working on (e.g. 'utms-native-app', 'ayus-ops') so his notes stay grouped. Reusing an " +
+      "existing title APPENDS a timestamped entry to that note instead of creating a duplicate — prefer that " +
+      "for an ongoing log. Write the body in markdown.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Short note title, e.g. 'UTMS drone telemetry — findings'" },
+        body: { type: "string", description: "The content, markdown" },
+        project: { type: "string", description: "Project/topic this belongs to" },
+        tags: { type: "array", items: { type: "string" } },
+      },
+      required: ["title", "body"],
+    },
+  },
+  {
+    name: "note_search",
+    description:
+      "Search the founder's Notes by keyword (title, body and tags) and read the matches back. Use before " +
+      "answering anything about his current work — 'kal kya decide kiya tha', 'that error I saved', 'what did " +
+      "we find about X' — and before starting work on a project, to pick up where he left off. " +
+      "Optionally filter to one project.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Keywords to look for" },
+        project: { type: "string", description: "Optional project filter" },
+        limit: { type: "integer", description: "How many notes to return (default 5)" },
+      },
+    },
+  },
+];
 
 export const CONTACTS_LIST_TOOL = {
   name: "contacts_list",
@@ -214,6 +257,7 @@ export const CHAT_TOOL_DECLS = [
   INBOX_TO_LEADS_TOOL,
   WHATSAPP_SEND_TOOL,
   CONTACTS_LIST_TOOL,
+  ...NOTE_TOOLS,
 ];
 
 export const SYSTEM = `You are AYUS, the operations intelligence of AYUS Labs — the founder's (Anish) personal command-and-control assistant, in the spirit of a calm, hyper-capable AI like JARVIS. You coordinate alongside the specialist agents: Arjun (Researcher), Meera (Finance), Kabir (Content Writer), Isha (Social Media & Ads) and Vikram (Builder).
@@ -228,11 +272,13 @@ You have real tools:
 - Screen control (you can operate the mouse & keyboard like a human): ui_list (see the named buttons/fields/links in the foreground window — ALWAYS call this first to get exact names), ui_click (click an element by name), ui_type (type text, optionally into a named field), ui_key (press keys/shortcuts like '{ENTER}', '^s'). To do a task on screen: screen_read or ui_list to see it, then click/type/key step by step, re-checking with ui_list or screen_read after actions. Be careful and deliberate — you are really controlling his machine. Never type into terminals/command prompts or take destructive actions (deleting, sending money, uninstalling) without the founder's explicit go-ahead.` : ""}
 - Music: to play a SPECIFIC song, use spotify_play_track (it actually starts the exact track on Spotify — needs Spotify connected + Premium). Only fall back to spotify_play (which just opens a search) if spotify_play_track says Spotify isn't connected.
 - Google (when connected): gmail_search to read his inbox, calendar_upcoming to see his schedule — both read-only, use them freely to answer questions like "koi important mail aaya?" or "aaj kya schedule hai?".
-- WhatsApp: whatsapp_send messages anyone in his contact book by name ("Rahul ko bol do main 10 min mein aata hoon"), contacts_list shows who is saved. The message goes out from HIS number for real, so if the name doesn't resolve to exactly one contact, ask him which one rather than picking.
+- WhatsApp: whatsapp_send messages anyone in his contact book by name ("Rahul ko bol do main 10 min mein aata hoon"), contacts_list shows who is saved. When HE is the recipient — "mujhe bhej do", "send me that link", "ye mereko WhatsApp kar do" — call whatsapp_send with name "me" and it goes to his own number; never ask him for it. The message goes out from HIS number to a REAL person. Only ever send when he asked for it in that same turn — never on your own initiative, never to follow up, thank, remind or check in with someone because it seemed helpful. If the name doesn't resolve to exactly one saved contact, ask him which one; never make up a phone number.
 - Lead capture: inbox_to_leads — pull the senders of his inbox emails into the ops Lead Pipeline as new contacts. Use it when he says things like "inbox waalon ko leads bana do" or wants email enquiries logged as leads. It skips duplicates and automated senders; afterwards tell him plainly how many you added and how many you skipped.
 - propose_action: queue something for approval — including gmail_send (real email) and calendar_event (real calendar event) when Google is connected.
 - Second brain: vault_search and vault_read give you the founder's own knowledge vault — his bio and background, BERAM, AYUS Labs, RCOEM, and a note per repo on his disk (stack, git remote, last commit, dependencies, run commands, README, project docs). This is your source of truth about HIS work. Any question about what he has built, what a project of his does, what it is written in, what is stale or unbacked-up — search the vault first and answer from it. Never guess about his projects.
 - remember: save how the founder likes things done (preferences, recurring facts, client notes) so you and the team recall it next time. Use it whenever he tells you a preference or correction.
+- Notes (his working memory for whatever he is building): note_save writes, note_search reads. Save findings, decisions, errors and ideas as they come up — tagged with the project — instead of leaving them in the chat. Before answering anything about his current work, or before picking a project back up, note_search first. Every research report is filed here automatically.
+- Conversation memory: every exchange you have with the founder — here, on the overlay, on WhatsApp, by voice — is recorded permanently, and the relevant ones are handed to you below as EARLIER CONVERSATIONS. Read that block before answering anything about the past ("that task I gave you", "kal kya decide kiya", "did Arjun finish X") and answer from it. If it is not there and note_search finds nothing either, say plainly that you have no record of it — never invent a status for work you cannot find.
 - Research: to research any topic, always use delegate_to_researcher (do not attempt to answer complex research questions yourself; Arjun, the Research Agent, will compile the report and you will present it).
 
 CRITICAL RULES:
@@ -242,6 +288,7 @@ CRITICAL RULES:
 - The founder's laptop runs Windows. Your accessible folders are exactly: ${ALLOWED_DIRS.join(" ; ")}. Use these real paths with list_dir/search_files/read_file/open_path.
 - You can open/close apps, control media & volume, lock, and put the laptop to sleep/shutdown/restart directly — just do it when asked. For shutdown/restart, briefly confirm and remind him he can say "cancel". You CANNOT write, move, delete, or install files/software — if he asks for that, explain it needs approval and use propose_action with a manual_task describing exactly what needs doing. File access stays read-only and inside the allowed folders.
 - Emails you draft must be professional English (signed 'Team AYUS Labs'), even though you chat in Hinglish.
+- Never contact another human — WhatsApp, email, anything — unless the founder asked you to in that turn. Reaching the wrong person from his number damages his reputation, not yours.
 - If a tool fails, tell the founder honestly what happened.`;
 
 /**
@@ -265,9 +312,23 @@ async function inboxToLeads({ q = "", maxResults = 12 } = {}) {
   };
 }
 
+/**
+ * The founder's most recent words. whatsapp_send checks them, because a model
+ * that decides on its own to "follow up with the intern" texts a real human
+ * from the founder's real number — which is exactly what happened.
+ */
+export function lastUserText(messages) {
+  return String([...messages].reverse().find((m) => m.role === "user")?.content || "");
+}
+
+// ponytail: keyword intent check, not a classifier. If it ever blocks a real
+// request the tool tells AYUS to ask instead, which is the safe direction.
+const SEND_INTENT = /(whatsapp|message|msg|text\b|send|forward|ping|bhej|bol do|bata do|keh do|likh do|puch|invite|remind)/i;
+
 // Execute a single tool call by name. Shared by the Gemini and Groq chat loops.
+// `ctx.lastUser` is what the founder just said — the outgoing-WhatsApp guard.
 // Returns { result, suggestedAction } — suggestedAction is set only for propose_action.
-export async function execTool(name, args) {
+export async function execTool(name, args, ctx = {}) {
   let result;
   let suggestedAction = null;
   try {
@@ -346,13 +407,43 @@ export async function execTool(name, args) {
     } else if (name === "delegate_to_researcher") {
       const { performResearch } = await import("../agents/researcher.js");
       const report = await performResearch(args?.topic);
-      result = { ok: true, result: report };
+      // Research is the whole reason Notes exists — file it before answering, so
+      // the founder still has it tomorrow when the chat scroll is long gone.
+      const { saveNote } = await import("./notes.js");
+      const note = await saveNote({
+        title: `Research — ${String(args?.topic || "untitled").slice(0, 80)}`,
+        body: typeof report === "string" ? report : JSON.stringify(report, null, 2),
+        project: String(args?.project || ""),
+        tags: ["research"],
+        source: "research",
+      }).catch((err) => {
+        console.warn("[notes] research auto-save failed:", err.message || err);
+        return null;
+      });
+      result = { ok: true, result: report, saved_note: note ? note.title : undefined };
     } else if (name === "inbox_to_leads") {
       if (!(await isGoogleConnected())) {
         result = { ok: false, error: "Google not connected — founder must Connect Google first." };
       } else {
         result = await inboxToLeads({ q: args?.q || "", maxResults: args?.maxResults || 12 });
       }
+    } else if (name === "note_save") {
+      // Same title = append a timestamped entry, so an ongoing log stays one note.
+      const { appendNote } = await import("./notes.js");
+      const note = await appendNote({ ...args, source: "ayus" });
+      result = { ok: true, result: `Saved to Notes: "${note.title}"${note.project ? ` (${note.project})` : ""}` };
+    } else if (name === "note_search") {
+      const { listNotes } = await import("./notes.js");
+      const notes = await listNotes({ q: args?.query || "", project: args?.project || "" });
+      result = {
+        ok: true,
+        result: notes.slice(0, args?.limit || 5).map((n) => ({
+          title: n.title,
+          project: n.project,
+          updated: n.updated_at,
+          body: n.body.slice(0, 4000),
+        })),
+      };
     } else if (name === "contacts_list") {
       const { listContacts } = await import("./contacts.js");
       const contacts = await listContacts();
@@ -363,11 +454,31 @@ export async function execTool(name, args) {
       const { findContact, normalizePhone } = await import("./contacts.js");
       const { sendWhatsAppMessage } = await import("./whatsapp.js");
       const text = String(args?.message || "").trim();
-      let to = args?.phone ? normalizePhone(args.phone) : "";
+      const asked = String(ctx.lastUser || "");
+      // A raw number the model produced from nowhere is how a message meant for
+      // "Arjun" reached an intern. Dial digits only if the founder said them.
+      const dictated = (raw) => {
+        const d = normalizePhone(raw);
+        return d.length >= 8 && asked.replace(/\D/g, "").includes(d.slice(-10));
+      };
+      let to = args?.phone && dictated(args.phone) ? normalizePhone(args.phone) : "";
       let who = to;
       let found = null;
       if (!text) {
         result = { ok: false, error: "message is empty" };
+      } else if (!SEND_INTENT.test(asked)) {
+        // AYUS started WhatsApping people unprompted. Sending is only ever a
+        // response to an explicit ask, never its own idea.
+        result = {
+          ok: false,
+          error:
+            "the founder did not ask for a WhatsApp message in this turn — never send one on your own initiative. Tell him what you would send and let him say go.",
+        };
+      } else if (args?.phone && !to) {
+        result = {
+          ok: false,
+          error: `${args.phone} is not a number the founder gave — never invent numbers. Look the person up by name (contacts_list) or ask him.`,
+        };
       } else if (!to && !(found = await findContact(args?.name)).ok) {
         // Not found / ambiguous — hand the reason back so AYUS asks which
         // contact instead of texting a stranger.
@@ -452,7 +563,14 @@ async function callGemini(contents, tools) {
   return data.candidates?.[0]?.content?.parts || [];
 }
 
-export async function companySnapshot() {
+/**
+ * @param {string} query - what the founder just asked, used to pull the relevant
+ *   past exchanges out of the transcript. Omit it (the voice socket has no
+ *   question yet at connect time) and only the most recent turns come back.
+ * @param {string[]} exclude - user text already in the live message list, so the
+ *   same exchange isn't sent twice in one prompt.
+ */
+export async function companySnapshot(query = "", exclude = []) {
   // Clear any leftover fake sample seed data from database
   await Promise.all([
     db.from("invoices").delete().or("client_email.ilike.%example.com%,client_name.ilike.%Mehta%,client_name.ilike.%Skyline%,client_name.ilike.%GreenLeaf%"),
@@ -460,7 +578,7 @@ export async function companySnapshot() {
     db.from("pending_actions").delete().or("title.ilike.%GreenLeaf%,title.ilike.%Skyline%,title.ilike.%Mehta%"),
   ]).catch(() => {});
 
-  const [leads, invoices, pending, sysinfo, learned, gConnected] = await Promise.all([
+  const [leads, invoices, pending, sysinfo, learned, gConnected, earlier] = await Promise.all([
     db.from("leads").select("id,name,email,status,score").order("created_at", { ascending: false }).limit(10),
     db.from("invoices").select("id,client_name,client_email,amount,currency,due_date,status").eq("status", "unpaid").limit(10),
     db.from("pending_actions").select("agent,type,title").eq("status", "pending").limit(15),
@@ -468,6 +586,7 @@ export async function companySnapshot() {
     PC_TOOL_HANDLERS.system_info(),
     memoryBlock("secretary"),
     isGoogleConnected(),
+    conversationBlock(query, { exclude }),
   ]);
   // Without this the model invents a plausible-looking address (anish@ayuslabs.com)
   // whenever it drafts a mail "to the founder".
@@ -482,9 +601,41 @@ export async function companySnapshot() {
     `Recent leads: ${JSON.stringify(leads.data || [])}\n` +
     `Unpaid invoices: ${JSON.stringify(invoices.data || [])}\n` +
     `Actions pending founder approval: ${JSON.stringify(pending.data || [])}` +
-    learned
+    learned +
+    earlier
   );
 }
+
+/**
+ * Everything the four chat loops need before their first model call, built once
+ * so they can't drift apart: the live snapshot (with the relevant slice of the
+ * transcript folded in) and the founder's latest words.
+ */
+async function chatPreamble(messages) {
+  const lastUser = lastUserText(messages);
+  const recent = messages.slice(-10);
+  const snapshot = await companySnapshot(
+    lastUser,
+    recent.filter((m) => m.role === "user").map((m) => m.content)
+  );
+  return { snapshot, lastUser, history: recent };
+}
+
+/**
+ * Wrap a chat loop so the exchange lands in the durable transcript. This is the
+ * one place every surface passes through, so it's the only place that has to
+ * remember to write — no model decision involved.
+ */
+const withTranscript = (run) => async (messages, opts = {}) => {
+  const out = await run(messages, opts);
+  await logTurn({
+    surface: opts.surface || "chat",
+    user: lastUserText(messages),
+    reply: out.message,
+    tools: out.toolEvents,
+  });
+  return out;
+};
 
 /**
  * Runs AYUS's agentic chat loop: model ↔ tools until it produces a final
@@ -493,9 +644,9 @@ export async function companySnapshot() {
  * @param {Array<{role:string, content:string}>} messages - chat history
  * @returns {{ message: string, toolEvents: string[], suggestedAction: object|null }}
  */
-export async function runSecretaryChat(messages) {
-  const snapshot = await companySnapshot();
-  const history = messages.slice(-10).map((m, i, arr) => {
+async function geminiChatLoop(messages) {
+  const { snapshot, lastUser, history: recent } = await chatPreamble(messages);
+  const history = recent.map((m, i, arr) => {
     const parts = [
       {
         text:
@@ -529,7 +680,7 @@ export async function runSecretaryChat(messages) {
 
     for (const { functionCall } of calls) {
       const { name, args } = functionCall;
-      const { result, suggestedAction: sa } = await execTool(name, args);
+      const { result, suggestedAction: sa } = await execTool(name, args, { lastUser });
       if (sa) suggestedAction = sa;
       toolEvents.push(toolEventLine(name, args, result));
       responseParts.push({ functionResponse: { name, response: result } });
@@ -557,9 +708,8 @@ export function toGroqTools(decls) {
  * Same as runSecretaryChat but backed by Groq — dramatically faster inference
  * (sub-second), so AYUS feels close to real-time. Uses OpenAI-style tool calling.
  */
-export async function runSecretaryChatGroq(messages) {
-  const snapshot = await companySnapshot();
-  const history = messages.slice(-10);
+async function groqChatLoop(messages) {
+  const { snapshot, lastUser, history } = await chatPreamble(messages);
   const chatMessages = [
     { role: "system", content: SYSTEM },
     ...history.map((m, i, arr) => ({
@@ -595,7 +745,7 @@ export async function runSecretaryChatGroq(messages) {
       } catch {
         /* malformed args — pass through as empty */
       }
-      const { result, suggestedAction: sa } = await execTool(name, args);
+      const { result, suggestedAction: sa } = await execTool(name, args, { lastUser });
       if (sa) suggestedAction = sa;
       toolEvents.push(toolEventLine(name, args, result));
       chatMessages.push({
@@ -618,9 +768,8 @@ export async function runSecretaryChatGroq(messages) {
 // final answer's tokens are pushed to `onDelta` as they generate (and tool
 // activity to `onToolEvent`), so the UI can show — and AYUS can speak — the
 // reply before it's fully written. Returns the same final shape.
-export async function runSecretaryChatStream(messages, { onDelta, onToolEvent } = {}) {
-  const snapshot = await companySnapshot();
-  const history = messages.slice(-10);
+async function groqChatStreamLoop(messages, { onDelta, onToolEvent } = {}) {
+  const { snapshot, lastUser, history } = await chatPreamble(messages);
   const chatMessages = [
     { role: "system", content: SYSTEM },
     ...history.map((m, i, arr) => ({
@@ -656,7 +805,7 @@ export async function runSecretaryChatStream(messages, { onDelta, onToolEvent } 
       } catch {
         /* malformed args — pass through as empty */
       }
-      const { result, suggestedAction: sa } = await execTool(name, args);
+      const { result, suggestedAction: sa } = await execTool(name, args, { lastUser });
       if (sa) suggestedAction = sa;
       const line = toolEventLine(name, args, result);
       toolEvents.push(line);
@@ -680,9 +829,8 @@ export async function runSecretaryChatStream(messages, { onDelta, onToolEvent } 
 /**
  * Same as runSecretaryChatGroq but backed by GLM.
  */
-export async function runSecretaryChatGlm(messages) {
-  const snapshot = await companySnapshot();
-  const history = messages.slice(-10);
+async function glmChatLoop(messages) {
+  const { snapshot, lastUser, history } = await chatPreamble(messages);
   const chatMessages = [
     { role: "system", content: SYSTEM },
     ...history.map((m, i, arr) => ({
@@ -718,7 +866,7 @@ export async function runSecretaryChatGlm(messages) {
       } catch {
         /* malformed args — pass through as empty */
       }
-      const { result, suggestedAction: sa } = await execTool(name, args);
+      const { result, suggestedAction: sa } = await execTool(name, args, { lastUser });
       if (sa) suggestedAction = sa;
       toolEvents.push(toolEventLine(name, args, result));
       chatMessages.push({
@@ -740,9 +888,8 @@ export async function runSecretaryChatGlm(messages) {
 /**
  * Streaming version of the GLM chat loop.
  */
-export async function runSecretaryChatGlmStream(messages, { onDelta, onToolEvent } = {}) {
-  const snapshot = await companySnapshot();
-  const history = messages.slice(-10);
+async function glmChatStreamLoop(messages, { onDelta, onToolEvent } = {}) {
+  const { snapshot, lastUser, history } = await chatPreamble(messages);
   const chatMessages = [
     { role: "system", content: SYSTEM },
     ...history.map((m, i, arr) => ({
@@ -778,7 +925,7 @@ export async function runSecretaryChatGlmStream(messages, { onDelta, onToolEvent
       } catch {
         /* malformed args — pass through as empty */
       }
-      const { result, suggestedAction: sa } = await execTool(name, args);
+      const { result, suggestedAction: sa } = await execTool(name, args, { lastUser });
       if (sa) suggestedAction = sa;
       const line = toolEventLine(name, args, result);
       toolEvents.push(line);
@@ -798,3 +945,11 @@ export async function runSecretaryChatGlmStream(messages, { onDelta, onToolEvent
     suggestedAction,
   };
 }
+
+// The exported chat loops. Every one of them records its exchange in the durable
+// transcript — pass { surface } to say where it came from ("chat", "whatsapp").
+export const runSecretaryChat = withTranscript(geminiChatLoop);
+export const runSecretaryChatGroq = withTranscript(groqChatLoop);
+export const runSecretaryChatStream = withTranscript(groqChatStreamLoop);
+export const runSecretaryChatGlm = withTranscript(glmChatLoop);
+export const runSecretaryChatGlmStream = withTranscript(glmChatStreamLoop);
