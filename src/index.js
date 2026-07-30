@@ -972,22 +972,8 @@ wss.on("connection", async (ws, request) => {
             if (NON_BLOCKING_TOOLS.has(name)) inFlight.add(name);
 
             execTool(name, args).then(async ({ result, suggestedAction }) => {
-              if (suggestedAction) {
-                const { error } = await db.from("pending_actions").insert({
-                  agent: "secretary",
-                  type: String(suggestedAction.type || "manual_task"),
-                  title: String(suggestedAction.title || "Voice proposal"),
-                  summary: suggestedAction.summary || null,
-                  payload: suggestedAction.payload || {},
-                  status: "pending",
-                });
-                if (error) {
-                  console.error(`[ws] failed to queue proposal: ${error.message}`);
-                  return reply({ ok: false, error: `Could not queue that draft: ${error.message}` });
-                }
-                console.log(`[ws] queued proposal: ${suggestedAction.title}`);
-                return reply({ ok: true, result: "Queued in the founder's approval queue — it is waiting for him there. Do not propose it again; just tell him it is queued." });
-              }
+              // execTool queues proposals itself now — this path only logs them.
+              if (suggestedAction) console.log(`[ws] queued proposal: ${suggestedAction.title}`);
               console.log(`[ws] Tool execution result:`, result);
               reply(result);
             }).catch(err => {

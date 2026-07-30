@@ -621,7 +621,6 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [proposingMap, setProposingMap] = useState({});
   const chatEndRef = useRef(null);
 
   // All voice behaviour (dictation, hands-free conversation, "Hello AYUS" wake
@@ -697,13 +696,13 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
         toolEvents: response.toolEvents || [],
         timestamp: new Date().toISOString(),
         suggestedAction: response.hasSuggestion ? response.suggestedAction : null,
-        actionAdded: false,
-        actionDismissed: false
       };
 
       const finalMessages = [...updatedMessages, ayusMsg];
       setMessages(finalMessages);
       localStorage.setItem("ayus_chat_history", JSON.stringify(finalMessages));
+      // The proposal is already in the queue — refresh the approvals badge.
+      if (response.hasSuggestion) onActionProposed?.();
       voice.speakReply(response.message); // speaks if un-muted; keeps a conversation going
     } catch (err) {
       showToast("Error communicating with AYUS: " + err.message, "err");
@@ -722,45 +721,6 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
   function handleSend(e) {
     e.preventDefault();
     sendMessage(input);
-  }
-
-  async function handlePropose(msgIndex, suggestedAction) {
-    setProposingMap(prev => ({ ...prev, [msgIndex]: true }));
-    try {
-      await api("/actions/propose", {
-        method: "POST",
-        body: JSON.stringify({
-          type: suggestedAction.type,
-          title: suggestedAction.title,
-          summary: suggestedAction.summary,
-          payload: suggestedAction.payload
-        })
-      });
-
-      // Update state and localStorage
-      const updated = [...messages];
-      if (updated[msgIndex]) {
-        updated[msgIndex].actionAdded = true;
-      }
-      setMessages(updated);
-      localStorage.setItem("ayus_chat_history", JSON.stringify(updated));
-
-      showToast("Proposal added to approval queue ✓", "ok");
-      if (onActionProposed) onActionProposed();
-    } catch (err) {
-      showToast("Failed to propose action: " + err.message, "err");
-    } finally {
-      setProposingMap(prev => ({ ...prev, [msgIndex]: false }));
-    }
-  }
-
-  function handleDismiss(msgIndex) {
-    const updated = [...messages];
-    if (updated[msgIndex]) {
-      updated[msgIndex].actionDismissed = true;
-    }
-    setMessages(updated);
-    localStorage.setItem("ayus_chat_history", JSON.stringify(updated));
   }
 
   function clearHistory() {
@@ -818,9 +778,9 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
                 </div>
               </div>
 
-              {m.suggestedAction && !m.actionAdded && !m.actionDismissed && (
+              {m.suggestedAction && (
                 <div className="chat-suggestion-card">
-                  <div className="suggestion-badge">PROPOSAL DRAFTED</div>
+                  <div className="suggestion-badge">✓ QUEUED FOR APPROVAL</div>
                   <h4>{m.suggestedAction.title}</h4>
                   <p className="suggestion-summary">{m.suggestedAction.summary}</p>
                   
@@ -842,28 +802,7 @@ function AyusChatDrawer({ isOpen, onClose, onActionProposed, showToast }) {
                     )}
                   </div>
 
-                  <div className="suggestion-actions">
-                    <button
-                      className="btn-add-queue"
-                      disabled={proposingMap[idx]}
-                      onClick={() => handlePropose(idx, m.suggestedAction)}
-                    >
-                      {proposingMap[idx] ? "Proposing..." : "✓ Add to Approval Queue"}
-                    </button>
-                    <button
-                      className="btn-dismiss-suggestion"
-                      onClick={() => handleDismiss(idx)}
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {m.suggestedAction && m.actionAdded && (
-                <div className="chat-suggestion-card suggestion-completed">
-                  <span className="success-badge">✓ Added to main approval queue</span>
-                  <h4>{m.suggestedAction.title}</h4>
+                  <div className="suggestion-foot">Waiting in the Approvals tab — approve it there to actually send.</div>
                 </div>
               )}
             </div>

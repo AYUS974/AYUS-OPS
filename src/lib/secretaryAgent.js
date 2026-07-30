@@ -272,8 +272,33 @@ export async function execTool(name, args) {
   let suggestedAction = null;
   try {
     if (name === "propose_action") {
+      // The row is inserted HERE, not by whoever called this tool. It used to be
+      // the caller's job, and only the voice WebSocket ever did it — so every
+      // proposal made from the AYUS page, the overlay or WhatsApp was announced
+      // as "queued for approval" and then silently dropped.
       suggestedAction = args;
-      result = { ok: true, result: "Draft ready — it will be shown to the founder to add to the approval queue." };
+      const { data, error } = await db
+        .from("pending_actions")
+        .insert({
+          agent: "secretary",
+          type: String(args?.type || "manual_task"),
+          title: String(args?.title || "Untitled proposal"),
+          summary: args?.summary || null,
+          payload: args?.payload || {},
+          status: "pending",
+        })
+        .select("id")
+        .single();
+      if (error) {
+        suggestedAction = null; // nothing is queued — don't let a UI claim it is
+        result = { ok: false, error: `could not queue that draft: ${error.message}` };
+      } else {
+        suggestedAction = { ...args, id: data.id };
+        result = {
+          ok: true,
+          result: "Queued in the founder's approval queue — it is waiting for him there. Do not propose it again; just tell him it is queued.",
+        };
+      }
     } else if (name === "gmail_search") {
       if (!(await isGoogleConnected())) {
         result = { ok: false, error: "Google not connected — founder must Connect Google first." };

@@ -1794,12 +1794,8 @@ h1, h2, h3, .display, .brand {
   box-shadow: 0 10px 25px rgba(0,0,0,0.4), inset 0 0 15px rgba(244, 63, 94, 0.05);
   border-left: 3px solid var(--secretary);
 }
-.chat-suggestion-card.suggestion-completed {
-  border: 1px solid rgba(16, 185, 129, 0.3);
-  border-left: 3px solid var(--approve);
-  background: rgba(16, 185, 129, 0.03);
-}
-.suggestion-badge { font-family: var(--mono); font-size: 8.5px; color: var(--secretary); letter-spacing: 0.12em; font-weight: 700; margin-bottom: 6px; text-transform: uppercase; }
+.suggestion-badge { font-family: var(--mono); font-size: 8.5px; color: var(--approve); letter-spacing: 0.12em; font-weight: 700; margin-bottom: 6px; text-transform: uppercase; }
+.suggestion-foot { margin-top: 10px; font-size: 11px; color: var(--muted); }
 .success-badge { font-family: var(--mono); font-size: 9px; color: var(--approve); letter-spacing: 0.05em; font-weight: 700; margin-bottom: 5px; display: block; text-transform: uppercase; }
 .chat-suggestion-card h4 { font-size: 13.5px; font-weight: 600; color: var(--ink-bright); margin-bottom: 4px; }
 .suggestion-summary { font-size: 12px; color: var(--muted-bright); line-height: 1.5; margin-bottom: 10px; }
