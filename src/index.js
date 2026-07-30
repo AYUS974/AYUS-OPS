@@ -825,14 +825,14 @@ wss.on("connection", async (ws, request) => {
     const geminiWs = new WebSocket(geminiUrl);
     currentGeminiWs = geminiWs;
 
-    // Send the setup config as soon as Gemini connection opens
-    geminiWs.on("open", async () => {
+    // Send the setup config as soon as Gemini connection opens. NOTHING may be
+    // awaited in here: `setup` has to be the very first frame Gemini receives,
+    // and the browser's mic audio is forwarded the instant this socket is OPEN.
+    // Any await lets an audio frame overtake setup → close 1007 "Request
+    // contains an invalid argument".
+    geminiWs.on("open", () => {
       console.log(`[ws] Gemini Live connection open (${targetModel}). Sending setup config...`);
       hasConnected = true;
-      
-      // Build system instruction including company snapshot
-      const snapshot = await companySnapshot();
-      const fullSystemInstruction = `${SYSTEM}\n\n${snapshot}`;
 
       // Helper to uppercase schema types recursively for Gemini validation
       function uppercaseSchemaTypes(schema) {
@@ -982,6 +982,12 @@ wss.on("connection", async (ws, request) => {
       ws.close(code, reason);
     });
   }
+
+  // Built before the Gemini socket exists — companySnapshot() hits Supabase and
+  // system_info(), which takes seconds. Doing it inside the open handler let mic
+  // audio reach Gemini ahead of `setup`. Shared by the fallback reconnect.
+  const fullSystemInstruction = `${SYSTEM}\n\n${await companySnapshot()}`;
+  if (ws.readyState !== WebSocket.OPEN) return; // client gave up while we waited
 
   connectGemini(primaryModel);
 
